@@ -1,0 +1,1 @@
+Railway: Create project -> Deploy from GitHub repo -> select repository. Set BOT_TOKEN in Variables. Start command: python bot.py (already in railway.json). No public domain needed for polling bot. NOTE: SQLite users.db on ephemeral filesystem will not persist across redeploys; migrate to Postgres before production. Do not commit .env or secrets.
