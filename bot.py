@@ -10,8 +10,8 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup,
-                           KeyboardButton, Message, ReplyKeyboardMarkup)
+from aiogram.types import (FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove,
+                           CallbackQuery, Message)
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -95,8 +95,18 @@ def setting(k):
         row=c.execute('SELECT value FROM settings WHERE key=?',(k,)).fetchone()
     return row['value'] if row else ''
 
+# Inline buttons render inside the chat message for BOTH menus.
+BUTTON_IDS = {label: f'btn_{i}' for i, label in enumerate(dict.fromkeys(
+    [label for group in ROWS + ADMIN_ROWS for label in group] +
+    ['🎁 استبدال نقاط', '➕ منح نقاط ولاء', '🎁 إنشاء جائزة ولاء', '👮 لوحة تحكم الإدارة']
+))}
+ID_BUTTONS = {v: k for k, v in BUTTON_IDS.items()}
+
 def keyboard(rows):
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=x) for x in row] for row in rows], resize_keyboard=True, is_persistent=True, input_field_placeholder='اختر خدمة من القائمة')
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=label, callback_data=BUTTON_IDS[label]) for label in group]
+        for group in rows
+    ])
 
 def back():
     return keyboard([['🏠 القائمة الرئيسية'],['👮 لوحة تحكم الإدارة']])
@@ -113,6 +123,42 @@ async def home(m, welcome=False):
     if welcome and GIF.exists():
         await m.answer('📋 القائمة الرئيسية',reply_markup=keyboard(ROWS + ([['👮 لوحة تحكم الإدارة']] if admin(m.from_user) else [])))
 
+@router.callback_query(F.data.startswith('btn_'))
+async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
+    label = ID_BUTTONS.get(q.data)
+    if not label or not q.message:
+        return await q.answer('زر غير معروف', show_alert=True)
+    await q.answer()
+    # Callback messages are sent by the bot; substitute the actual clicking user.
+    m = q.message.model_copy(update={'from_user': q.from_user, 'text': label})
+    if label == '🏠 القائمة الرئيسية':
+        return await go_home(m, state)
+    if label == '👮 لوحة تحكم الإدارة':
+        return await panel(m, state)
+    routes = {
+        '🌟 نقاط الولاء': lambda: loyalty(m),
+        '🎁 استبدال نقاط': lambda: claim_start(m, state),
+        '🌟 إدارة نقاط الولاء': lambda: loyalty_admin(m),
+        '➕ منح نقاط ولاء': lambda: add_start(m, state),
+        '🎁 إنشاء جائزة ولاء': lambda: reward_start(m, state),
+        '⚡ تعجيل جوائز نقاط الولاء': lambda: awards(m, state),
+        '👥 المستخدمين': lambda: users(m),
+        '📊 تقرير': lambda: report(m),
+        '🔎 البحث عن مستخدم': lambda: lookup_start(m, state),
+        '🚫 حظر مستخدم': lambda: ban_start(m, state),
+        '🔓 فك حظر مستخدم': lambda: ban_start(m, state),
+        '⚙️ حالة البوت (تشغيل/إيقاف)': lambda: toggle(m),
+        '📝 تعديل نص البونصات والعروض الحالية': lambda: bonus_start(m, state),
+        '📢 الإذاعة': lambda: broadcast_start(m, state),
+        '📝 رسالة للأدمن': lambda: support_start(m, state),
+    }
+    if label in routes:
+        return await routes[label]()
+    if label in ADMIN_ALL:
+        return await admin_placeholder(m)
+    if label in ALL:
+        return await services(m, bot)
+
 @router.message(CommandStart())
 async def start(m: Message, state:FSMContext):
     await state.clear()
@@ -122,6 +168,7 @@ async def start(m: Message, state:FSMContext):
         try: ref=int(p[1][4:])
         except ValueError: pass
     save(m.from_user,ref)
+    await m.answer('تم تحديث طريقة عرض القوائم.', reply_markup=ReplyKeyboardRemove())
     await home(m,True)
 
 @router.message(Command('admin'))
