@@ -103,6 +103,8 @@ class Input(StatesGroup):
     user_transfer = State()
     gift_redeem = State()
     admin_code = State()
+    admin_code_amount = State()
+    admin_code_uses = State()
     admin_search = State()
 
 def db():
@@ -323,6 +325,7 @@ async def add_finish(m:Message,state:FSMContext):
         found=cur.rowcount
     if not found: return await m.answer('المستخدم غير موجود، لازم يبدأ البوت أولاً.')
     audit(m.from_user.id,'loyalty_points_added',f'{uid}:{pts}')
+    await notify_user(m.bot,uid,f'🌟 أضافت الإدارة {pts} نقطة ولاء لحسابك.')
     await state.clear()
     await m.answer(f'تمت إضافة {pts} نقطة للمستخدم {uid}.',reply_markup=keyboard(LOYALTY_ADMIN_ROWS))
 
@@ -419,6 +422,7 @@ async def ban_finish(m:Message,state:FSMContext):
     banned=1 if await state.get_state()==Input.ban.state else 0
     with db() as c: c.execute('UPDATE users SET banned=? WHERE id=?',(banned,int(m.text)))
     audit(m.from_user.id,'ban_change',f'{m.text}:{banned}')
+    await notify_user(m.bot,int(m.text),'🚫 تم حظر حسابك من البوت بواسطة الإدارة.' if banned else '🔓 تم فك حظر حسابك بواسطة الإدارة.')
     await state.clear()
     await m.answer('تم تحديث حالة المستخدم.',reply_markup=keyboard(USER_ADMIN_ROWS))
 
@@ -553,6 +557,7 @@ async def user_callback(q,state):
             row=c.execute('SELECT banned FROM users WHERE id=?',(uid,)).fetchone()
             if row: c.execute('UPDATE users SET banned=? WHERE id=?',(1-int(row['banned']),uid))
         audit(q.from_user.id,'user_ban_toggle',uid)
+        await notify_user(q.bot,uid,'🚫 تم حظر حسابك من البوت بواسطة الإدارة.' if row and not int(row['banned']) else '🔓 تم فك حظر حسابك بواسطة الإدارة.')
         return await show_user_detail(q.message,uid,page)
     if action=='history':
         with db() as c: rows=c.execute('SELECT delta,balance_after,created FROM bot_ledger WHERE user_id=? ORDER BY id DESC LIMIT 12',(uid,)).fetchall()
@@ -587,6 +592,11 @@ async def apply_internal_change(m:Message,state:FSMContext):
             c.execute('UPDATE users SET bot_balance=? WHERE id=?',(new,uid))
             c.execute('INSERT INTO bot_ledger(user_id,admin_id,delta,balance_after) VALUES(?,?,?,?)',(uid,m.from_user.id,delta,new))
     audit(m.from_user.id,'internal_'+action,f'{uid}:{amount}')
+    if action=='points':
+        notice=f'🌟 عدّلت الإدارة نقاط ولائك: +{amount} نقطة.\nرصيد النقاط الحالي: {new}'
+    else:
+        notice=f'💰 عدّلت الإدارة رصيدك الداخلي: {"إضافة" if action=="credit" else "خصم"} {amount}.\nالرصيد الحالي: {new}'
+    await notify_user(m.bot,uid,notice)
     await state.clear()
     await m.answer(f'✅ تمت العملية داخل البوت فقط. الرصيد/النقاط الجديدة: {new}\nلا يوجد أي تحويل إلى Ichancy.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='↩️ ملف المستخدم',callback_data=f'ud:{uid}:{page}')]]))
 
@@ -681,7 +691,7 @@ async def admin_action(message,state,user,action):
         return await message.answer(prompt)
     if action=='🎟️ إضافة كود':
         await state.set_state(Input.admin_code)
-        return await message.answer('أرسل: CODE المبلغ عدد_الاستخدامات\nمثال: GIFT2026 50 10')
+        return await message.answer('🎟️ أرسل اسم الكود فقط، مثال: code\nسيُضاف اسم Sheikh تلقائياً للكود.')
     if action=='📊 تقرير':
         with db() as c:
             total=c.execute('SELECT COUNT(*) FROM users').fetchone()[0]; pending=c.execute("SELECT COUNT(*) FROM claims WHERE status='pending'").fetchone()[0]
@@ -720,18 +730,55 @@ async def admin_config_finish(m:Message,state:FSMContext):
     await m.answer('✅ تم حفظ التعديل داخل البوت.',reply_markup=admin_actions_keyboard())
 
 @router.message(Input.admin_code)
-async def admin_code_finish(m:Message,state:FSMContext):
+async def admin_code_name(m:Message,state:FSMContext):
+    if not admin(m.from_user): return
+    raw=(m.text or '').strip()
+    if not (1<=len(raw)<=30 and raw.isascii() and raw.isalnum()):
+        return await m.answer('أرسل اسماً إنجليزياً أو أرقاماً فقط، بدون فراغات، بحد أقصى 30 حرفاً.')
+    code=raw.upper()+'SHEIKH'
+    with db() as c:
+        if c.execute('SELECT 1 FROM gift_codes WHERE code=?',(code,)).fetchone():
+            return await m.answer('الكود موجود مسبقاً، اختر اسماً مختلفاً.')
+    await state.update_data(gift_code_name=code)
+    await state.set_state(Input.admin_code_amount)
+    await m.answer(f'🎟️ الكود: {code}\n💰 أدخل قيمة الكود بالرصيد الداخلي:')
+
+@router.message(Input.admin_code_amount)
+async def admin_code_amount(m:Message,state:FSMContext):
     if not admin(m.from_user): return
     try:
-        code,amount,uses=(m.text or '').split(); amount=int(amount); uses=int(uses)
-        assert 0<amount<=100000000 and 0<uses<=100000 and 1<=len(code)<=40 and code.isascii() and code.isalnum()
-    except (ValueError,AssertionError): return await m.answer('مثال: GIFT2026 50 10')
+        amount=int((m.text or '').strip())
+        if not 0<amount<=100000000: raise ValueError()
+    except ValueError:
+        return await m.answer('أدخل قيمة صحيحة موجبة.')
+    await state.update_data(gift_code_amount=amount)
+    await state.set_state(Input.admin_code_uses)
+    await m.answer('👥 هذا الكود صالح لكم شخص؟ أرسل العدد:')
+
+@router.message(Input.admin_code_uses)
+async def admin_code_uses(m:Message,state:FSMContext):
+    if not admin(m.from_user): return
     try:
-        with db() as c: c.execute('INSERT INTO gift_codes(code,amount,max_uses) VALUES(?,?,?)',(code.upper(),amount,uses))
-    except sqlite3.IntegrityError: return await m.answer('هذا الكود موجود مسبقاً.')
-    audit(m.from_user.id,'gift_code_created',code)
+        uses=int((m.text or '').strip())
+        if not 0<uses<=100000: raise ValueError()
+    except ValueError:
+        return await m.answer('أدخل عدد مستخدمين صحيحاً وموجباً.')
+    data=await state.get_data(); code=data['gift_code_name']; amount=data['gift_code_amount']
+    try:
+        with db() as c:
+            c.execute('INSERT INTO gift_codes(code,amount,max_uses) VALUES(?,?,?)',(code,amount,uses))
+    except sqlite3.IntegrityError:
+        await state.clear()
+        return await m.answer('الكود موجود مسبقاً، أعد المحاولة.')
+    audit(m.from_user.id,'gift_code_created',f'{code}:{amount}:{uses}')
     await state.clear()
-    await m.answer('✅ تم إنشاء كود هدية للرصيد الداخلي فقط.',reply_markup=keyboard(CODE_ADMIN_ROWS))
+    await m.answer(f'✅ تم إنشاء كود الهدية\n🎟️ {code}\n💰 القيمة: {amount}\n👥 عدد المستخدمين: {uses}\nالرصيد داخلي فقط.',reply_markup=keyboard(CODE_ADMIN_ROWS))
+
+async def notify_user(bot, uid, text):
+    try:
+        await bot.send_message(uid,text)
+    except Exception:
+        logging.info('User notification not delivered for %s (bot may be blocked)',uid)
 
 async def admin_search_start(m,state):
     await state.set_state(Input.lookup)

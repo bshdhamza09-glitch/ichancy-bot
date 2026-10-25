@@ -25,3 +25,10 @@ Telegram aiogram 3 bot, inline keyboard for both public and admin menus. All bal
 
 ## Security
 Do not put agent passwords or bot tokens in GitHub. Use Railway Variables. Avoid enabling any external money movements until official API documentation, permissions, idempotency and reconciliation are implemented.
+
+## V8 — gift code wizard and account notifications
+- Admin > Codes > Add code: enter English name, automatically append `SHEIKH`, then amount and number of users.
+- Existing gift code redemption remains local to the bot.
+- User receives a private Telegram message for admin balance credit/debit, loyalty points grants, and ban/unban changes.
+- If the user has blocked the bot or never opened it, Telegram cannot deliver the notification; this is logged.
+- No Ichancy API integration or real financial movement.
