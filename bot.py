@@ -96,6 +96,8 @@ class Input(StatesGroup):
     broadcast = State()
     bonus_text = State()
     support = State()
+    balance_change = State()
+    points_change = State()
 
 def db():
     DB.parent.mkdir(parents=True, exist_ok=True)
@@ -107,11 +109,14 @@ def init():
     with db() as c:
         c.executescript('''
         CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, referrer INTEGER, points INTEGER NOT NULL DEFAULT 0, banned INTEGER NOT NULL DEFAULT 0, joined TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS bot_ledger(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, admin_id INTEGER NOT NULL, delta INTEGER NOT NULL, balance_after INTEGER NOT NULL, created TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS rewards(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, cost INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1);
         CREATE TABLE IF NOT EXISTS claims(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, reward_id INTEGER NOT NULL, points_cost INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created TEXT DEFAULT CURRENT_TIMESTAMP, resolved TEXT);
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT, actor INTEGER, action TEXT, details TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP);
         ''')
+        cols={r[1] for r in c.execute('PRAGMA table_info(users)')}
+        if 'bot_balance' not in cols: c.execute('ALTER TABLE users ADD COLUMN bot_balance INTEGER NOT NULL DEFAULT 0')
         c.execute("INSERT OR IGNORE INTO settings VALUES ('enabled','1')")
         c.execute("INSERT OR IGNORE INTO settings VALUES ('bonuses','لا توجد عروض منشورة حالياً.')")
 
@@ -159,6 +164,10 @@ async def home(m, welcome=False):
 
 @router.callback_query(F.data.startswith('btn_'))
 async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
+    if q.data.startswith(('ul:', 'ud:', 'ua:', 'uc:')):
+        if not admin(q.from_user): return await q.answer('غير مصرح', show_alert=True)
+        await q.answer()
+        return await user_callback(q, state)
     label = ID_BUTTONS.get(q.data)
     if not label or not q.message:
         return await q.answer('زر غير معروف', show_alert=True)
@@ -171,10 +180,7 @@ async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
         return await q.message.edit_text('👮 لوحة تحكم الإدارة — Sheikh', reply_markup=keyboard(ADMIN_ROWS))
     if label == '👥 المستخدمين':
         if not admin(q.from_user): return await q.answer('غير مصرح', show_alert=True)
-        with db() as c:
-            total=c.execute('SELECT COUNT(*) FROM users').fetchone()[0]
-            banned=c.execute('SELECT COUNT(*) FROM users WHERE banned=1').fetchone()[0]
-        return await q.message.edit_text(f'👥 إدارة المستخدمين\nالمستخدمون: {total} | المحظورون: {banned}', reply_markup=keyboard(USER_ADMIN_ROWS))
+        return await show_user_list(q.message, 0)
     if label in ADMIN_MENUS and label != '🌟 نقاط الولاء':
         if not admin(q.from_user): return await q.answer('غير مصرح', show_alert=True)
         title, rows=ADMIN_MENUS[label]
@@ -469,6 +475,91 @@ async def services(m:Message,bot:Bot):
 async def admin_placeholder(m:Message):
     if not admin(m.from_user): return
     await m.answer(f'{m.text}\n\n🛠️ هذا القسم ظاهر حسب التصميم المرجعي، لكنه غير مفعّل بعد. لا تتم أي حركة مالية أو سحب بيانات غير مصرح به.')
+
+def user_list_markup(page, total, records):
+    rows=[]
+    for u in records:
+        name=(u['first_name'] or u['username'] or 'مستخدم').replace('\n',' ')[:28]
+        rows.append([InlineKeyboardButton(text=f"👤 {name} | {u['id']}",callback_data=f"ud:{u['id']}:{page}")])
+    nav=[]
+    if page>0: nav.append(InlineKeyboardButton(text='⬅️ السابق',callback_data=f'ul:{page-1}'))
+    if (page+1)*8<total: nav.append(InlineKeyboardButton(text='التالي ➡️',callback_data=f'ul:{page+1}'))
+    if nav: rows.append(nav)
+    rows.append([InlineKeyboardButton(text='↩️ لوحة الأدمن',callback_data=BUTTON_IDS['↩️ رجوع للوحة الأدمن'])])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+async def show_user_list(message, page=0):
+    with db() as c:
+        total=c.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+        page=max(0,min(page,max(0,(total-1)//8)))
+        rows=c.execute('SELECT id,username,first_name FROM users ORDER BY joined DESC,id DESC LIMIT 8 OFFSET ?', (page*8,)).fetchall()
+    txt=f'👥 المستخدمون: {total}\nاضغط على اسم المستخدم لفتح ملفه.\nالصفحة {page+1} من {max(1,(total+7)//8)}'
+    await message.edit_text(txt,reply_markup=user_list_markup(page,total,rows))
+
+async def show_user_detail(message, uid, page=0):
+    with db() as c:
+        u=c.execute('SELECT * FROM users WHERE id=?',(uid,)).fetchone()
+    if not u: return await message.edit_text('المستخدم غير موجود.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='↩️ المستخدمون',callback_data=f'ul:{page}')]]))
+    txt=(f"👤 {u['first_name'] or 'بدون اسم'}\n🔖 @{u['username'] or 'بدون يوزر'}\n🆔 {uid}\n"
+         f"💰 رصيد البوت الداخلي: {u['bot_balance']}\n🌟 نقاط الولاء: {u['points']}\n"
+         f"🚫 الحالة: {'محظور' if u['banned'] else 'نشط'}\n📅 التسجيل: {u['joined']}\n\nالرصيد هنا داخلي وليس رصيد Ichancy.")
+    rows=[
+        [InlineKeyboardButton(text='➕ إضافة رصيد',callback_data=f'ua:credit:{uid}:{page}'),InlineKeyboardButton(text='➖ خصم رصيد',callback_data=f'ua:debit:{uid}:{page}')],
+        [InlineKeyboardButton(text='🌟 تعديل النقاط',callback_data=f'ua:points:{uid}:{page}'),InlineKeyboardButton(text='📜 سجل العمليات',callback_data=f'ua:history:{uid}:{page}')],
+        [InlineKeyboardButton(text='🔓 فك الحظر' if u['banned'] else '🚫 حظر المستخدم',callback_data=f'ua:ban:{uid}:{page}')],
+        [InlineKeyboardButton(text='↩️ قائمة المستخدمين',callback_data=f'ul:{page}')]
+    ]
+    await message.edit_text(txt,reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+async def user_callback(q,state):
+    parts=q.data.split(':')
+    if parts[0]=='ul': return await show_user_list(q.message,int(parts[1]))
+    if parts[0]=='ud': return await show_user_detail(q.message,int(parts[1]),int(parts[2]))
+    if parts[0]=='uc':
+        await state.clear()
+        return await show_user_detail(q.message,int(parts[1]),int(parts[2]))
+    action,uid,page=parts[1],int(parts[2]),int(parts[3])
+    if action=='ban':
+        with db() as c:
+            row=c.execute('SELECT banned FROM users WHERE id=?',(uid,)).fetchone()
+            if row: c.execute('UPDATE users SET banned=? WHERE id=?',(1-int(row['banned']),uid))
+        audit(q.from_user.id,'user_ban_toggle',uid)
+        return await show_user_detail(q.message,uid,page)
+    if action=='history':
+        with db() as c: rows=c.execute('SELECT delta,balance_after,created FROM bot_ledger WHERE user_id=? ORDER BY id DESC LIMIT 12',(uid,)).fetchall()
+        lines='\n'.join(f"{r['created']}: {r['delta']:+d} → {r['balance_after']}" for r in rows) or 'لا توجد عمليات'
+        return await q.message.edit_text(f'📜 سجل رصيد البوت للمستخدم {uid}\n{lines}',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='↩️ ملف المستخدم',callback_data=f'ud:{uid}:{page}')]]))
+    if action in ('credit','debit','points'):
+        await state.set_state(Input.points_change if action=='points' else Input.balance_change)
+        await state.update_data(target_uid=uid,action=action,page=page)
+        await q.message.edit_text(f"{'🌟 تعديل النقاط' if action=='points' else '💰 تعديل رصيد البوت'} للمستخدم {uid}\nأرسل المبلغ كعدد صحيح موجب (وحدة داخلية).",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='↩️ إلغاء',callback_data=f'uc:{uid}:{page}')]]))
+
+@router.message(Input.balance_change)
+@router.message(Input.points_change)
+async def apply_internal_change(m:Message,state:FSMContext):
+    if not admin(m.from_user): return
+    data=await state.get_data()
+    try:
+        amount=int((m.text or '').strip())
+        if not 0<amount<=100000000: raise ValueError()
+    except ValueError: return await m.answer('أرسل عدداً صحيحاً موجباً ضمن الحد المسموح.')
+    uid,action,page=data['target_uid'],data['action'],data['page']
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        row=c.execute('SELECT bot_balance,points FROM users WHERE id=?',(uid,)).fetchone()
+        if not row: return await m.answer('المستخدم غير موجود.')
+        if action=='points':
+            new=row['points']+amount
+            c.execute('UPDATE users SET points=? WHERE id=?',(new,uid))
+        else:
+            delta=amount if action=='credit' else -amount
+            new=row['bot_balance']+delta
+            if new<0: return await m.answer('الرصيد غير كافٍ للخصم.')
+            c.execute('UPDATE users SET bot_balance=? WHERE id=?',(new,uid))
+            c.execute('INSERT INTO bot_ledger(user_id,admin_id,delta,balance_after) VALUES(?,?,?,?)',(uid,m.from_user.id,delta,new))
+    audit(m.from_user.id,'internal_'+action,f'{uid}:{amount}')
+    await state.clear()
+    await m.answer(f'✅ تمت العملية داخل البوت فقط. الرصيد/النقاط الجديدة: {new}\nلا يوجد أي تحويل إلى Ichancy.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='↩️ ملف المستخدم',callback_data=f'ud:{uid}:{page}')]]))
 
 @router.message()
 async def fallback(m:Message):
