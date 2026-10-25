@@ -63,6 +63,7 @@ LOYALTY_ADMIN_ROWS = [
 SETTINGS_ADMIN_ROWS = [
     ['⚙️ حالة البوت (تشغيل/إيقاف)'],
     ['⚙️ تعديل سعر الدولار', '🔥 حرق رقم عملية'],
+    ['📝 إدارة المحتوى والروابط'],
     ['↩️ رجوع للوحة الأدمن'],
 ]
 REPORT_ADMIN_ROWS = [['📊 تقرير'], ['↩️ رجوع للوحة الأدمن']]
@@ -98,6 +99,11 @@ class Input(StatesGroup):
     support = State()
     balance_change = State()
     points_change = State()
+    admin_config = State()
+    user_transfer = State()
+    gift_redeem = State()
+    admin_code = State()
+    admin_search = State()
 
 def db():
     DB.parent.mkdir(parents=True, exist_ok=True)
@@ -114,11 +120,18 @@ def init():
         CREATE TABLE IF NOT EXISTS claims(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, reward_id INTEGER NOT NULL, points_cost INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created TEXT DEFAULT CURRENT_TIMESTAMP, resolved TEXT);
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT, actor INTEGER, action TEXT, details TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS gift_codes(code TEXT PRIMARY KEY, amount INTEGER NOT NULL, max_uses INTEGER NOT NULL DEFAULT 1, uses INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS gift_redemptions(code TEXT NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY(code,user_id));
+        CREATE TABLE IF NOT EXISTS referrals_paid(user_id INTEGER PRIMARY KEY, paid_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS support_messages(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, body TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP);
+        
         ''')
         cols={r[1] for r in c.execute('PRAGMA table_info(users)')}
         if 'bot_balance' not in cols: c.execute('ALTER TABLE users ADD COLUMN bot_balance INTEGER NOT NULL DEFAULT 0')
         c.execute("INSERT OR IGNORE INTO settings VALUES ('enabled','1')")
         c.execute("INSERT OR IGNORE INTO settings VALUES ('bonuses','لا توجد عروض منشورة حالياً.')")
+        for key,value in [('dollar_rate','0'),('cashback','10'),('weekly_cashback','10'),('referral_reward','0'),('terms','يرجى الالتزام بشروط استخدام البوت.'),('tutorials','لا توجد شروحات منشورة حالياً.'),('vpn_url',''),('apk_url',''),('games_url',''),('direct_url',''),('contact_url',''),('jackpot','غير متاح حالياً.'),('free_spin','غير متاح حالياً.'),('current_prize','لا توجد جائزة حالية.'),('sham_codes',''),('syriatel_codes','')]:
+            c.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',(key,value))
 
 def audit(actor, action, details=''):
     with db() as c:
@@ -155,19 +168,26 @@ def admin(u):
 
 async def home(m, welcome=False):
     msg=f'🏠 أهلاً بك في بوت {NAME}\nاختر الخدمة من القائمة التالية 👇'
-    if welcome and GIF.exists():
+    if welcome and GIF.exists() and os.getenv('SEND_WELCOME_GIF','0')=='1':
         await m.answer_animation(FSInputFile(GIF), caption=msg)
     else:
         await m.answer(msg, reply_markup=keyboard(ROWS))
-    if welcome and GIF.exists():
+    if welcome and GIF.exists() and os.getenv('SEND_WELCOME_GIF','0')=='1':
         await m.answer('📋 القائمة الرئيسية',reply_markup=keyboard(ROWS))
 
-@router.callback_query(F.data.startswith('btn_'))
+@router.callback_query(F.data.startswith(('btn_', 'ul:', 'ud:', 'ua:', 'uc:', 'ac:', 'gift:')))
 async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
     if q.data.startswith(('ul:', 'ud:', 'ua:', 'uc:')):
         if not admin(q.from_user): return await q.answer('غير مصرح', show_alert=True)
         await q.answer()
         return await user_callback(q, state)
+    if q.data.startswith('ac:'):
+        if not admin(q.from_user): return await q.answer('غير مصرح',show_alert=True)
+        await q.answer()
+        return await admin_action(q.message.model_copy(update={'from_user':q.from_user}),state,q.from_user,q.data[3:])
+    if q.data.startswith('gift:'):
+        await q.answer()
+        return await redeem_code(q.from_user.id,q.data[5:],q.message)
     label = ID_BUTTONS.get(q.data)
     if not label or not q.message:
         return await q.answer('زر غير معروف', show_alert=True)
@@ -205,13 +225,16 @@ async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
         '📝 تعديل نص البونصات والعروض الحالية': lambda: bonus_start(m, state),
         '📢 الإذاعة': lambda: broadcast_start(m, state),
         '📝 رسالة للأدمن': lambda: support_start(m, state),
+        '🎟️ إهداء رصيد': lambda: transfer_start(m,state),
+        '🎁 كود هدية': lambda: gift_start(m,state),
+        '🔎 البحث عن مستخدم': lambda: admin_search_start(m,state),
     }
     if label in ADMIN_ALL and not admin(q.from_user):
         return await q.answer('غير مصرح لك بالدخول', show_alert=True)
     if label in routes:
         return await routes[label]()
     if label in ADMIN_ALL:
-        return await admin_placeholder(m)
+        return await admin_action(q.message.model_copy(update={'from_user':q.from_user}),state,q.from_user,label)
     if label in ALL:
         return await services(m, bot)
 
@@ -224,7 +247,6 @@ async def start(m: Message, state:FSMContext):
         try: ref=int(p[1][4:])
         except ValueError: pass
     save(m.from_user,ref)
-    await m.answer('تم تحديث طريقة عرض القوائم.', reply_markup=ReplyKeyboardRemove())
     await home(m,True)
 
 @router.message(Command('admin'))
@@ -373,15 +395,16 @@ async def report(m:Message):
 async def lookup_start(m:Message,state:FSMContext):
     if not admin(m.from_user): return
     await state.set_state(Input.lookup)
-    await m.answer('أرسل Telegram ID للمستخدم.',reply_markup=back())
+    await m.answer('أرسل Telegram ID أو اسم المستخدم.',reply_markup=back())
 
 @router.message(Input.lookup)
 async def lookup_finish(m:Message,state:FSMContext):
-    if not (m.text or '').isdigit(): return await m.answer('أرسل رقماً صحيحاً.')
+    query=(m.text or '').strip().lstrip('@')
     with db() as c:
-        u=c.execute('SELECT * FROM users WHERE id=?',(int(m.text),)).fetchone()
+        u=c.execute('SELECT * FROM users WHERE id=?' if query.isdigit() else 'SELECT * FROM users WHERE username=? COLLATE NOCASE',(int(query) if query.isdigit() else query,)).fetchone()
     await state.clear()
-    await m.answer(f"المستخدم: {u['id']}\n@{u['username']}\nنقاط: {u['points']}\nمحظور: {bool(u['banned'])}" if u else 'المستخدم غير موجود.',reply_markup=keyboard(ADMIN_ROWS))
+    if u: return await m.answer(f"👤 {u['first_name']} | {u['id']}",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='فتح ملف المستخدم',callback_data=f"ud:{u['id']}:0")]]))
+    await m.answer('المستخدم غير موجود.',reply_markup=keyboard(ADMIN_ROWS))
 
 @router.message(F.text.in_({'🚫 حظر مستخدم','🔓 فك حظر مستخدم'}))
 async def ban_start(m:Message,state:FSMContext):
@@ -466,10 +489,16 @@ async def services(m:Message,bot:Bot):
         with db() as c: n=c.execute('SELECT COUNT(*) n FROM users WHERE referrer=?',(m.from_user.id,)).fetchone()['n']
         return await m.answer(f'https://t.me/{me.username}?start=ref_{m.from_user.id}\nعدد الإحالات: {n}\nلا توجد أرباح تلقائية مفعلة.')
     if m.text=='🎁 البونصات والعروض الحالية': return await m.answer(setting('bonuses'))
-    if m.text=='🟥 Ichancy': return await m.answer(f'مرحباً بك في {NAME}.')
-    if m.text in ('💸 شحن رصيد البوت','💰 سحب رصيد البوت','🎟️ إهداء رصيد'):
+    if m.text=='🟥 Ichancy': return await m.answer('خدمات Ichancy الخارجية غير متصلة حالياً؛ بانتظار الربط الرسمي.')
+    if m.text in ('💸 شحن رصيد البوت','💰 سحب رصيد البوت'):
         return await m.answer('🔒 الخدمة غير مفعلة. لا يتم تنفيذ أي تحويل مالي قبل ربط الـ API الرسمي واختباره.')
-    await m.answer(f'{m.text}\n\nهذا القسم قيد الإعداد. لا توجد عملية تلقائية مفعّلة حالياً.')
+    lookup={'💜 الشروط والأحكام':'terms','⚠️ الشروحات':'tutorials','🟣 الجاكبوت':'jackpot','💵 اللفة المجانية':'free_spin','💌 تواصل معنا':'contact_url','↗️ Vpn لتشغيل كامل أقسام الموقع':'vpn_url','↗️ ichancy apk':'apk_url','🎰 ألعاب Ichancy':'games_url','⭐ دخول مباشر للألعاب':'direct_url'}
+    if m.text in lookup:
+        val=setting(lookup[m.text]); return await m.answer(val or 'لم يضف الأدمن محتوى هذا القسم بعد.',reply_markup=keyboard([['🏠 القائمة الرئيسية']]))
+    if m.text=='✅ السجل':
+        with db() as c: rows=c.execute('SELECT delta,balance_after,created FROM bot_ledger WHERE user_id=? ORDER BY id DESC LIMIT 15',(m.from_user.id,)).fetchall()
+        return await m.answer('📜 سجل رصيد البوت الداخلي\n'+('\n'.join(f"{r['created']} | {r['delta']:+} | {r['balance_after']}" for r in rows) or 'لا توجد عمليات'))
+    await m.answer('هذا القسم معلوماتي فقط، وليس متصلاً بـ Ichancy.')
 
 @router.message(F.text.in_(ADMIN_ALL))
 async def admin_placeholder(m:Message):
@@ -560,6 +589,164 @@ async def apply_internal_change(m:Message,state:FSMContext):
     audit(m.from_user.id,'internal_'+action,f'{uid}:{amount}')
     await state.clear()
     await m.answer(f'✅ تمت العملية داخل البوت فقط. الرصيد/النقاط الجديدة: {new}\nلا يوجد أي تحويل إلى Ichancy.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='↩️ ملف المستخدم',callback_data=f'ud:{uid}:{page}')]]))
+
+
+# All balances in these handlers are LOCAL bot ledger balances; no Ichancy operations.
+def add_local_balance(c,uid,delta,actor):
+    row=c.execute('SELECT bot_balance FROM users WHERE id=?',(uid,)).fetchone()
+    if not row or row['bot_balance']+delta<0: raise ValueError('المستخدم غير موجود أو الرصيد غير كافٍ')
+    new=row['bot_balance']+delta
+    c.execute('UPDATE users SET bot_balance=? WHERE id=?',(new,uid))
+    c.execute('INSERT INTO bot_ledger(user_id,admin_id,delta,balance_after) VALUES(?,?,?,?)',(uid,actor,delta,new))
+    return new
+
+@router.message(F.text=='🎟️ إهداء رصيد')
+async def transfer_start(m:Message,state:FSMContext):
+    await state.set_state(Input.user_transfer)
+    await m.answer('🎟️ إهداء رصيد البوت الداخلي\nأرسل: Telegram_ID المبلغ\nمثال: 123456789 50\nالتحويل نهائي، ولا يمس رصيد Ichancy.')
+
+@router.message(Input.user_transfer)
+async def transfer_finish(m:Message,state:FSMContext):
+    try:
+        uid,amount=map(int,(m.text or '').split()); assert 0<amount<=100000000 and uid!=m.from_user.id
+    except (ValueError,AssertionError): return await m.answer('أرسل رقم المستخدم والمبلغ الصحيح.')
+    try:
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            if not c.execute('SELECT id FROM users WHERE id=? AND banned=0',(m.from_user.id,)).fetchone(): raise ValueError('حسابك غير متاح')
+            if not c.execute('SELECT id FROM users WHERE id=? AND banned=0',(uid,)).fetchone(): raise ValueError('المستلم غير مسجل أو محظور')
+            add_local_balance(c,m.from_user.id,-amount,m.from_user.id)
+            add_local_balance(c,uid,amount,m.from_user.id)
+    except ValueError as e: return await m.answer(str(e))
+    await state.clear()
+    await m.answer(f'✅ تم تحويل {amount} من رصيد البوت الداخلي إلى {uid}.')
+    try: await m.bot.send_message(uid,f'🎟️ وصلك إهداء {amount} من رصيد البوت الداخلي.')
+    except Exception: pass
+
+@router.message(F.text=='🎁 كود هدية')
+async def gift_start(m:Message,state:FSMContext):
+    await state.set_state(Input.gift_redeem)
+    await m.answer('🎁 أرسل كود الهدية للحصول على رصيد داخلي في البوت.')
+
+async def redeem_code(uid,code,message):
+    code=code.strip().upper()
+    try:
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            r=c.execute('SELECT amount,max_uses,uses FROM gift_codes WHERE code=?',(code,)).fetchone()
+            if not r or r['uses']>=r['max_uses']: raise ValueError('الكود غير موجود أو انتهت صلاحيته.')
+            if c.execute('SELECT 1 FROM gift_redemptions WHERE code=? AND user_id=?',(code,uid)).fetchone(): raise ValueError('استخدمت هذا الكود سابقاً.')
+            if not c.execute('SELECT 1 FROM users WHERE id=? AND banned=0',(uid,)).fetchone(): raise ValueError('الحساب غير متاح.')
+            c.execute('INSERT INTO gift_redemptions(code,user_id) VALUES(?,?)',(code,uid))
+            c.execute('UPDATE gift_codes SET uses=uses+1 WHERE code=?',(code,))
+            new=add_local_balance(c,uid,r['amount'],0)
+    except ValueError as e: return await message.answer(str(e))
+    await message.answer(f'🎁 تم إضافة {r["amount"]} رصيد داخلي. رصيدك الآن {new}.')
+
+@router.message(Input.gift_redeem)
+async def gift_finish(m:Message,state:FSMContext):
+    await state.clear()
+    await redeem_code(m.from_user.id,m.text or '',m)
+
+ADMIN_ACTIONS={
+ '⚙️ تعديل سعر الدولار':('dollar_rate','أرسل سعر الدولار (رقم موجب).'),
+ '💸 الكاش باك الأسبوعي 10%':('cashback','أرسل نسبة الكاش باك للعرض (0 إلى 100).'),
+ '💰 توزيع أرباح الإحالات':('referral_reward','أرسل مكافأة الإحالة الداخلية لكل مستخدم جديد (0 لتعطيلها).'),
+ '💳 تعديل أكواد شام كاش':('sham_codes','أرسل نص أكواد شام كاش.'),
+ '💳 تعديل أكواد سيريتل كاش':('syriatel_codes','أرسل نص أكواد سيريتل كاش.'),
+ '🎁 إدارة الجائزة الحالية':('current_prize','أرسل وصف الجائزة الحالية.'),
+ '🎁 إضافة أو حذف البونص':('bonuses','أرسل نص البونصات الجديد.'),
+ '📝 تعديل نص البونصات والعروض الحالية':('bonuses','أرسل نص البونصات الجديد.'),
+ '🔥 حرق رقم عملية':('burned_operation','أرسل رقم العملية للتسجيل الإداري فقط (لا يؤثر على Ichancy).'),
+}
+
+def admin_actions_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+      [InlineKeyboardButton(text='📋 إدارة المحتوى والروابط',callback_data='ac:content')],
+      [InlineKeyboardButton(text='↩️ رجوع للوحة الأدمن',callback_data=BUTTON_IDS['↩️ رجوع للوحة الأدمن'])]])
+
+async def admin_action(message,state,user,action):
+    if action in ('content','📝 إدارة المحتوى والروابط'):
+        keys=[('شروط الاستخدام','terms'),('الشروحات','tutorials'),('رابط التواصل','contact_url'),('رابط VPN','vpn_url'),('رابط APK','apk_url'),('رابط الألعاب','games_url'),('الدخول المباشر','direct_url'),('الجاكبوت','jackpot'),('اللفة المجانية','free_spin')]
+        return await message.edit_text('📝 تعديل محتوى الأقسام والروابط',reply_markup=InlineKeyboardMarkup(inline_keyboard=[*[ [InlineKeyboardButton(text=label,callback_data='ac:cfg:'+key)] for label,key in keys], [InlineKeyboardButton(text='↩️ لوحة الأدمن',callback_data=BUTTON_IDS['↩️ رجوع للوحة الأدمن'])]]))
+    if action.startswith('cfg:'):
+        key=action[4:]
+        await state.set_state(Input.admin_config)
+        await state.update_data(config_key=key)
+        return await message.answer(f'أرسل القيمة الجديدة لـ {key}.')
+    if action in ADMIN_ACTIONS:
+        key,prompt=ADMIN_ACTIONS[action]
+        await state.set_state(Input.admin_config)
+        await state.update_data(config_key=key)
+        return await message.answer(prompt)
+    if action=='🎟️ إضافة كود':
+        await state.set_state(Input.admin_code)
+        return await message.answer('أرسل: CODE المبلغ عدد_الاستخدامات\nمثال: GIFT2026 50 10')
+    if action=='📊 تقرير':
+        with db() as c:
+            total=c.execute('SELECT COUNT(*) FROM users').fetchone()[0]; pending=c.execute("SELECT COUNT(*) FROM claims WHERE status='pending'").fetchone()[0]
+        return await message.answer(f'📊 المستخدمون: {total}\n🎁 جوائز معلقة: {pending}')
+    if action=='🔎 البحث عن مستخدم': return await admin_search_start(message,state)
+    if action=='📜 سجل مستخدم': return await admin_search_start(message,state)
+    if action=='➕ إضافة رصيد' or action=='➖ خصم رصيد' or action in ('🚫 حظر مستخدم','🔓 فك حظر مستخدم'):
+        return await message.answer('اختر المستخدم أولاً من 👥 المستخدمين، ثم نفّذ العملية من ملفه.')
+
+    if action=='⚙️ حالة البوت (تشغيل/إيقاف)':
+        v='0' if setting('enabled')=='1' else '1'
+        with db() as c: c.execute("UPDATE settings SET value=? WHERE key='enabled'",(v,))
+        audit(user.id,'bot_enabled',v)
+        return await message.answer('✅ البوت مفعّل' if v=='1' else '⏸️ البوت متوقف للمستخدمين')
+    if action=='🌟 إدارة نقاط الولاء': return await message.answer('🌟 لوحة الولاء',reply_markup=keyboard(LOYALTY_ADMIN_ROWS))
+    if action=='➕ منح نقاط ولاء': return await add_start(message,state)
+    if action=='🎁 إنشاء جائزة ولاء': return await reward_start(message,state)
+    if action=='⚡ تعجيل جوائز نقاط الولاء': return await awards(message,state)
+    if action=='📢 الإذاعة': return await broadcast_start(message,state)
+    if action=='📝 تعديل نص البونصات والعروض الحالية': return await bonus_start(message,state)
+    return await message.answer('هذه العملية غير مدعومة دون تكامل رسمي؛ لم يتم تنفيذ أي تغيير مالي خارجي.')
+
+@router.message(Input.admin_config)
+async def admin_config_finish(m:Message,state:FSMContext):
+    if not admin(m.from_user): return
+    data=await state.get_data(); key=data['config_key']; value=(m.text or '').strip()
+    if not value or len(value)>3500: return await m.answer('أرسل قيمة نصية لا تتجاوز 3500 حرف.')
+    if key in ('dollar_rate','cashback','referral_reward'):
+        try:
+            v=float(value)
+            if v<0 or (key=='cashback' and v>100): raise ValueError()
+        except ValueError: return await m.answer('القيمة الرقمية غير صحيحة.')
+    with db() as c: c.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,value))
+    audit(m.from_user.id,'config_updated',key)
+    await state.clear()
+    await m.answer('✅ تم حفظ التعديل داخل البوت.',reply_markup=admin_actions_keyboard())
+
+@router.message(Input.admin_code)
+async def admin_code_finish(m:Message,state:FSMContext):
+    if not admin(m.from_user): return
+    try:
+        code,amount,uses=(m.text or '').split(); amount=int(amount); uses=int(uses)
+        assert 0<amount<=100000000 and 0<uses<=100000 and 1<=len(code)<=40 and code.isascii() and code.isalnum()
+    except (ValueError,AssertionError): return await m.answer('مثال: GIFT2026 50 10')
+    try:
+        with db() as c: c.execute('INSERT INTO gift_codes(code,amount,max_uses) VALUES(?,?,?)',(code.upper(),amount,uses))
+    except sqlite3.IntegrityError: return await m.answer('هذا الكود موجود مسبقاً.')
+    audit(m.from_user.id,'gift_code_created',code)
+    await state.clear()
+    await m.answer('✅ تم إنشاء كود هدية للرصيد الداخلي فقط.',reply_markup=keyboard(CODE_ADMIN_ROWS))
+
+async def admin_search_start(m,state):
+    await state.set_state(Input.lookup)
+    await m.answer('أرسل Telegram ID أو اسم المستخدم للبحث.')
+
+@router.message(Command('cancel'))
+async def cancel(m:Message,state:FSMContext):
+    await state.clear()
+    await m.answer('تم إلغاء العملية. /start للقائمة الرئيسية أو /admin للإدارة.')
+
+@router.message(Command('balance'))
+async def my_balance(m:Message):
+    save(m.from_user)
+    with db() as c: r=c.execute('SELECT bot_balance,points FROM users WHERE id=?',(m.from_user.id,)).fetchone()
+    await m.answer(f'💰 رصيد البوت الداخلي: {r["bot_balance"]}\n🌟 نقاط الولاء: {r["points"]}\nرصيد Ichancy منفصل.')
 
 @router.message()
 async def fallback(m:Message):
