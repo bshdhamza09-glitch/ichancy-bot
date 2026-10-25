@@ -1,2 +1,1 @@
-# Railway setup
-Deploy from GitHub. Configure `BOT_TOKEN`, `BOT_NAME`, `ADMIN_IDS`. Add a persistent volume mounted at `/data` and `DATABASE_PATH=/data/sheikh.db`. Use one bot worker/replica with long polling. Restart deployment after updating variables.
+Railway: deploy from GitHub. Set BOT_TOKEN, BOT_NAME=Sheikh and ADMIN_IDS=first_id,second_id in Variables. For persistent SQLite mount volume and set DATABASE_PATH=/data/sheikh.db. Do not upload .env. Use /start for user menu, /admin for admin menu.

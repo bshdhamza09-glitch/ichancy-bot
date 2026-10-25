@@ -37,19 +37,53 @@ ROWS = [
     ['🌟 نقاط الولاء'],
 ]
 ADMIN_ROWS = [
-    ['👥 المستخدمين'], ['🔎 البحث عن مستخدم'], ['📊 تقرير'],
-    ['🎟️ إضافة كود'], ['📜 سجل مستخدم'], ['💰 توزيع أرباح الإحالات'],
-    ['➕ إضافة رصيد', '➖ خصم رصيد'],
-    ['📝 تعديل نص البونصات والعروض الحالية'], ['🎁 إضافة أو حذف البونص'],
-    ['📢 الإذاعة'], ['💳 تعديل أكواد شام كاش', '💳 تعديل أكواد سيريتل كاش'],
-    ['⚙️ حالة البوت (تشغيل/إيقاف)'], ['⚙️ تعديل سعر الدولار'],
-    ['🔥 حرق رقم عملية'], ['💸 الكاش باك الأسبوعي 10%'],
-    ['🎁 إدارة الجائزة الحالية'], ['🚫 حظر مستخدم', '🔓 فك حظر مستخدم'],
-    ['🌟 إدارة نقاط الولاء'], ['⚡ تعجيل جوائز نقاط الولاء'],
+    ['👥 المستخدمين', '🎁 العروض والبونصات'],
+    ['🌟 إدارة نقاط الولاء', '📢 الإذاعة'],
+    ['⚙️ إعدادات البوت', '📊 التقارير'],
+    ['🎟️ الأكواد', '💰 الإحالات'],
     ['🏠 القائمة الرئيسية'],
 ]
+USER_ADMIN_ROWS = [
+    ['🔎 البحث عن مستخدم', '📜 سجل مستخدم'],
+    ['➕ إضافة رصيد', '➖ خصم رصيد'],
+    ['🚫 حظر مستخدم', '🔓 فك حظر مستخدم'],
+    ['↩️ رجوع للوحة الأدمن'],
+]
+BONUS_ADMIN_ROWS = [
+    ['📝 تعديل نص البونصات والعروض الحالية'],
+    ['🎁 إضافة أو حذف البونص', '🎁 إدارة الجائزة الحالية'],
+    ['💸 الكاش باك الأسبوعي 10%'],
+    ['↩️ رجوع للوحة الأدمن'],
+]
+LOYALTY_ADMIN_ROWS = [
+    ['➕ منح نقاط ولاء', '🎁 إنشاء جائزة ولاء'],
+    ['⚡ تعجيل جوائز نقاط الولاء'],
+    ['↩️ رجوع للوحة الأدمن'],
+]
+SETTINGS_ADMIN_ROWS = [
+    ['⚙️ حالة البوت (تشغيل/إيقاف)'],
+    ['⚙️ تعديل سعر الدولار', '🔥 حرق رقم عملية'],
+    ['↩️ رجوع للوحة الأدمن'],
+]
+REPORT_ADMIN_ROWS = [['📊 تقرير'], ['↩️ رجوع للوحة الأدمن']]
+CODE_ADMIN_ROWS = [
+    ['🎟️ إضافة كود'],
+    ['💳 تعديل أكواد شام كاش', '💳 تعديل أكواد سيريتل كاش'],
+    ['↩️ رجوع للوحة الأدمن'],
+]
+REFERRAL_ADMIN_ROWS = [['💰 توزيع أرباح الإحالات'], ['↩️ رجوع للوحة الأدمن']]
+ADMIN_MENUS = {
+    '👥 المستخدمين': ('👥 إدارة المستخدمين', USER_ADMIN_ROWS),
+    '🎁 العروض والبونصات': ('🎁 إدارة العروض والبونصات', BONUS_ADMIN_ROWS),
+    '🌟 إدارة نقاط الولاء': ('🌟 إدارة نقاط الولاء', LOYALTY_ADMIN_ROWS),
+    '⚙️ إعدادات البوت': ('⚙️ إعدادات البوت', SETTINGS_ADMIN_ROWS),
+    '📊 التقارير': ('📊 التقارير', REPORT_ADMIN_ROWS),
+    '🎟️ الأكواد': ('🎟️ إدارة الأكواد', CODE_ADMIN_ROWS),
+    '💰 الإحالات': ('💰 إدارة الإحالات', REFERRAL_ADMIN_ROWS),
+}
+ADMIN_ALL = {x for row in (ADMIN_ROWS + USER_ADMIN_ROWS + BONUS_ADMIN_ROWS + LOYALTY_ADMIN_ROWS + SETTINGS_ADMIN_ROWS + REPORT_ADMIN_ROWS + CODE_ADMIN_ROWS + REFERRAL_ADMIN_ROWS) for x in row}
+
 ALL = {x for row in ROWS for x in row}
-ADMIN_ALL = {x for row in ADMIN_ROWS for x in row}
 
 class Input(StatesGroup):
     lookup = State()
@@ -97,8 +131,8 @@ def setting(k):
 
 # Inline buttons render inside the chat message for BOTH menus.
 BUTTON_IDS = {label: f'btn_{i}' for i, label in enumerate(dict.fromkeys(
-    [label for group in ROWS + ADMIN_ROWS for label in group] +
-    ['🎁 استبدال نقاط', '➕ منح نقاط ولاء', '🎁 إنشاء جائزة ولاء', '👮 لوحة تحكم الإدارة']
+    [label for group in ROWS + ADMIN_ROWS + USER_ADMIN_ROWS + BONUS_ADMIN_ROWS + LOYALTY_ADMIN_ROWS + SETTINGS_ADMIN_ROWS + REPORT_ADMIN_ROWS + CODE_ADMIN_ROWS + REFERRAL_ADMIN_ROWS for label in group] +
+    ['🎁 استبدال نقاط', '➕ منح نقاط ولاء', '🎁 إنشاء جائزة ولاء', '👮 لوحة تحكم الإدارة', '↩️ رجوع للوحة الأدمن']
 ))}
 ID_BUTTONS = {v: k for k, v in BUTTON_IDS.items()}
 
@@ -109,7 +143,7 @@ def keyboard(rows):
     ])
 
 def back():
-    return keyboard([['🏠 القائمة الرئيسية'],['👮 لوحة تحكم الإدارة']])
+    return keyboard([['🏠 القائمة الرئيسية'],['↩️ رجوع للوحة الأدمن']])
 
 def admin(u):
     return u and u.id in ADMIN_IDS
@@ -119,9 +153,9 @@ async def home(m, welcome=False):
     if welcome and GIF.exists():
         await m.answer_animation(FSInputFile(GIF), caption=msg)
     else:
-        await m.answer(msg, reply_markup=keyboard(ROWS + ([['👮 لوحة تحكم الإدارة']] if admin(m.from_user) else [])))
+        await m.answer(msg, reply_markup=keyboard(ROWS))
     if welcome and GIF.exists():
-        await m.answer('📋 القائمة الرئيسية',reply_markup=keyboard(ROWS + ([['👮 لوحة تحكم الإدارة']] if admin(m.from_user) else [])))
+        await m.answer('📋 القائمة الرئيسية',reply_markup=keyboard(ROWS))
 
 @router.callback_query(F.data.startswith('btn_'))
 async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
@@ -131,6 +165,20 @@ async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
     await q.answer()
     # Callback messages are sent by the bot; substitute the actual clicking user.
     m = q.message.model_copy(update={'from_user': q.from_user, 'text': label})
+    if label == '↩️ رجوع للوحة الأدمن':
+        if not admin(q.from_user): return await q.answer('غير مصرح', show_alert=True)
+        await state.clear()
+        return await q.message.edit_text('👮 لوحة تحكم الإدارة — Sheikh', reply_markup=keyboard(ADMIN_ROWS))
+    if label == '👥 المستخدمين':
+        if not admin(q.from_user): return await q.answer('غير مصرح', show_alert=True)
+        with db() as c:
+            total=c.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+            banned=c.execute('SELECT COUNT(*) FROM users WHERE banned=1').fetchone()[0]
+        return await q.message.edit_text(f'👥 إدارة المستخدمين\nالمستخدمون: {total} | المحظورون: {banned}', reply_markup=keyboard(USER_ADMIN_ROWS))
+    if label in ADMIN_MENUS and label != '🌟 نقاط الولاء':
+        if not admin(q.from_user): return await q.answer('غير مصرح', show_alert=True)
+        title, rows=ADMIN_MENUS[label]
+        return await q.message.edit_text(title, reply_markup=keyboard(rows))
     if label == '🏠 القائمة الرئيسية':
         return await go_home(m, state)
     if label == '👮 لوحة تحكم الإدارة':
@@ -138,7 +186,7 @@ async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
     routes = {
         '🌟 نقاط الولاء': lambda: loyalty(m),
         '🎁 استبدال نقاط': lambda: claim_start(m, state),
-        '🌟 إدارة نقاط الولاء': lambda: loyalty_admin(m),
+
         '➕ منح نقاط ولاء': lambda: add_start(m, state),
         '🎁 إنشاء جائزة ولاء': lambda: reward_start(m, state),
         '⚡ تعجيل جوائز نقاط الولاء': lambda: awards(m, state),
@@ -152,6 +200,8 @@ async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
         '📢 الإذاعة': lambda: broadcast_start(m, state),
         '📝 رسالة للأدمن': lambda: support_start(m, state),
     }
+    if label in ADMIN_ALL and not admin(q.from_user):
+        return await q.answer('غير مصرح لك بالدخول', show_alert=True)
     if label in routes:
         return await routes[label]()
     if label in ADMIN_ALL:
@@ -214,7 +264,7 @@ async def claim_finish(m:Message,state:FSMContext):
         cid=cur.lastrowid
     audit(m.from_user.id,'claim_created',cid)
     await state.clear()
-    await m.answer(f'تم تسجيل طلب الجائزة #{cid} وهو بانتظار مراجعة الأدمن.',reply_markup=keyboard(ROWS + ([['👮 لوحة تحكم الإدارة']] if admin(m.from_user) else [])))
+    await m.answer(f'تم تسجيل طلب الجائزة #{cid} وهو بانتظار مراجعة الأدمن.',reply_markup=keyboard(ROWS))
     for aid in ADMIN_IDS:
         try: await m.bot.send_message(aid,f'🎁 طلب جائزة ولاء جديد #{cid}\nالمستخدم: {m.from_user.id}\nاستخدم زر ⚡ تعجيل جوائز نقاط الولاء')
         except Exception: logging.exception('Could not notify admin')
@@ -226,7 +276,7 @@ async def loyalty_admin(m:Message):
         pending=c.execute("SELECT COUNT(*) n FROM claims WHERE status='pending'").fetchone()['n']
         rewards=c.execute('SELECT id,title,cost,active FROM rewards ORDER BY id DESC LIMIT 12').fetchall()
     txt='\n'.join(f"#{r['id']} {r['title']} — {r['cost']} نقطة {'🟢' if r['active'] else '🔴'}" for r in rewards) or 'لا توجد جوائز'
-    await m.answer(f'🌟 إدارة الولاء\nطلبات معلّقة: {pending}\n{txt}',reply_markup=keyboard([['➕ منح نقاط ولاء'],['🎁 إنشاء جائزة ولاء'],['⚡ تعجيل جوائز نقاط الولاء'],['👮 لوحة تحكم الإدارة']]))
+    await m.answer(f'🌟 إدارة الولاء\nطلبات معلّقة: {pending}\n{txt}',reply_markup=keyboard(LOYALTY_ADMIN_ROWS))
 
 @router.message(F.text == '➕ منح نقاط ولاء')
 async def add_start(m:Message,state:FSMContext):
@@ -246,7 +296,7 @@ async def add_finish(m:Message,state:FSMContext):
     if not found: return await m.answer('المستخدم غير موجود، لازم يبدأ البوت أولاً.')
     audit(m.from_user.id,'loyalty_points_added',f'{uid}:{pts}')
     await state.clear()
-    await m.answer(f'تمت إضافة {pts} نقطة للمستخدم {uid}.',reply_markup=keyboard(ADMIN_ROWS))
+    await m.answer(f'تمت إضافة {pts} نقطة للمستخدم {uid}.',reply_markup=keyboard(LOYALTY_ADMIN_ROWS))
 
 @router.message(F.text == '🎁 إنشاء جائزة ولاء')
 async def reward_start(m:Message,state:FSMContext):
@@ -265,7 +315,7 @@ async def reward_finish(m:Message,state:FSMContext):
         rid=c.execute('INSERT INTO rewards(title,cost) VALUES(?,?)',(title,cost)).lastrowid
     audit(m.from_user.id,'reward_created',rid)
     await state.clear()
-    await m.answer(f'تم إنشاء الجائزة #{rid}: {title} مقابل {cost} نقطة.',reply_markup=keyboard(ADMIN_ROWS))
+    await m.answer(f'تم إنشاء الجائزة #{rid}: {title} مقابل {cost} نقطة.',reply_markup=keyboard(LOYALTY_ADMIN_ROWS))
 
 @router.message(F.text == '⚡ تعجيل جوائز نقاط الولاء')
 async def awards(m:Message,state:FSMContext):
@@ -292,7 +342,7 @@ async def award_finish(m:Message,state:FSMContext):
         if status=='rejected': c.execute('UPDATE users SET points=points+? WHERE id=?',(r['points_cost'],r['user_id']))
     audit(m.from_user.id,'claim_'+status,cid)
     await state.clear()
-    await m.answer(f'تم تحديث الطلب #{cid} إلى {status}.',reply_markup=keyboard(ADMIN_ROWS))
+    await m.answer(f'تم تحديث الطلب #{cid} إلى {status}.',reply_markup=keyboard(LOYALTY_ADMIN_ROWS))
     try: await m.bot.send_message(r['user_id'],f'تحديث طلب جائزة الولاء #{cid}: {status}')
     except Exception: logging.exception('Notification failed')
 
@@ -302,7 +352,7 @@ async def users(m:Message):
     with db() as c:
         total=c.execute('SELECT COUNT(*) n FROM users').fetchone()['n']
         banned=c.execute('SELECT COUNT(*) n FROM users WHERE banned=1').fetchone()['n']
-    await m.answer(f'👥 عدد المستخدمين: {total}\n🚫 المحظورون: {banned}',reply_markup=keyboard(ADMIN_ROWS))
+    await m.answer(f'👥 عدد المستخدمين: {total}\n🚫 المحظورون: {banned}',reply_markup=keyboard(USER_ADMIN_ROWS))
 
 @router.message(F.text == '📊 تقرير')
 async def report(m:Message):
@@ -341,7 +391,7 @@ async def ban_finish(m:Message,state:FSMContext):
     with db() as c: c.execute('UPDATE users SET banned=? WHERE id=?',(banned,int(m.text)))
     audit(m.from_user.id,'ban_change',f'{m.text}:{banned}')
     await state.clear()
-    await m.answer('تم تحديث حالة المستخدم.',reply_markup=keyboard(ADMIN_ROWS))
+    await m.answer('تم تحديث حالة المستخدم.',reply_markup=keyboard(USER_ADMIN_ROWS))
 
 @router.message(F.text == '⚙️ حالة البوت (تشغيل/إيقاف)')
 async def toggle(m:Message):
