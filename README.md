@@ -1,14 +1,21 @@
 # Sheikh Telegram Bot — Railway
 
-بوت تلغرام بأزرار Inline داخل رسالة الترحيب بدلاً من لوحة المفاتيح السفلية.
+This version uses **ReplyKeyboardMarkup** to fill the chat keyboard area (Telegram decides actual button sizes). The admin panel is accessed by `/admin` and only IDs listed in `ADMIN_IDS` can open it.
 
-## تشغيل Railway
-1. ارفع محتويات هذا المجلد إلى جذر مستودع GitHub خاص (أو اضبط Root Directory إن كان المجلد فرعياً).
-2. Railway → New Project → Deploy from GitHub Repo.
-3. Variables: `BOT_TOKEN` (سري) و `BOT_NAME=Sheikh`.
-4. Start Command: `python bot.py` (موجود أيضاً في railway.json).
-5. أرسل `/start` للبوت. إن كانت هناك لوحة مفاتيح قديمة فستختفي عند `/start`.
+## Railway
+1. Upload the contents of this folder to a GitHub repository.
+2. Create a Railway service from the repository; `railway.json` starts `python bot.py`.
+3. Set Railway Variables: `BOT_TOKEN`, `BOT_NAME=Sheikh`, `ADMIN_IDS` (comma-separated Telegram numeric IDs).
+4. For persistent storage, attach a Railway Volume and set `DATABASE_PATH=/data/sheikh.db` (adjust `/data` to your volume mount). Without a volume, SQLite data may be lost on redeploy.
+5. Deploy and send `/start` to the bot. Admin sends `/admin`.
 
-ملاحظة: اسم حساب البوت الظاهر أعلى محادثة تلغرام يُعدّل من BotFather وليس من كود Python. وGIF الترحيب القديم لا يزال موجوداً؛ استبدله إن أردت شعار Sheikh بدلاً من الرسوم السابقة.
+## Features
+- Main reply keyboard arranged like reference, plus Loyalty Points.
+- Admin keyboard arranged like screenshots.
+- Working local loyalty points grants, reward creation, claim requests, manual approval/rejection with refund on rejection, and audit log.
+- Working user lookup, user counts, banning, broadcast, bonuses text and bot enable/disable.
+- Other admin buttons are intentionally **placeholders** until requirements are clarified. In particular, no fake Ichancy API, cash deposits, withdrawals, cashback, gift code or automatic prize transfer is implemented.
+- Claim approval records an admin decision only. It does **not** issue a financial transfer. Do not approve until prize fulfillment is verified separately.
 
-الأزرار المالية تجريبية ومقفلة. لا توجد أي عمليات مالية حقيقية ولا اتصال API. SQLite محلي وغير دائم على Railway بدون Volume؛ انتقل إلى قاعدة بيانات دائمة قبل الاستخدام الفعلي.
+## Security
+Never put the agent password, Bot Token, or API tokens in source code or GitHub. Use Railway secret variables. Only operations explicitly documented by Ichancy Agent API should ever be automated. Use PostgreSQL or a persistent volume before production.
