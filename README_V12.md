@@ -1,0 +1,1 @@
+Sheikh V12: Jackpot button, display handler, and admin jackpot editor removed. Updated terms and conditions once on existing databases; future admin edits remain available. Loyalty remains 1 point per 200 new SYP on approved deposits. No Ichancy API integration. Keep persistent Railway volume and test before production.

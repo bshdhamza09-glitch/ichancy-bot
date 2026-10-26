@@ -28,6 +28,8 @@ SYRIATEL_ACCOUNT = os.getenv('SYRIATEL_ACCOUNT', '0933185350').strip()
 QR = Path(__file__).with_name('sham_qr.jpg')
 
 
+TERMS_V12 = 'عند الضغط على زر موافقة فأنت توافق على الشروط القائمة ضمن البوت ويحق لك الإعتراض في حال مواجهة أي مشكلة خارجة عن شروط وقوانين البوت\n\nيرجى قراءة هذه الشّروط قبل استخدام البوت لضمان تجربة آمنة وسلسة:\n\nالبوت مخصّص لإنشاء الحسابات، والسّحب، والتعبئة الفورية لحسابات موقع Ichancy.\n\n1_منع الحسابات المتعدّدة:\nإنشاء أكثر من حساب للشّخص الواحد مخالف للقوانين، وقد يؤدّي إلى حظر الحسابات المرتبطة وتجميد أرصدتها، وذلك بناءاً على سياسة اللّعب النظيف .\n\n2_تبديل طرق الدفع غير مسموح:\nلا يُسمح بشحن رصيد وسحبه بغرض التبديل بين وسائل الدفع المختلفة. في حال اكتشاف عملية كهذه، يتم سحب الرّصيد والتّحفظ عليه دون إشعار مسبق.\n\n3_شروط أرباح الإحالات:\nتُحتسب أرباح الإحالة فقط بعد تسجيل 3 إحالات نشطة أو أكثر (أي قاموا بالتعبئة الفعلية).\n\n⛔️تنبيه:\nأي محاولة للتّحايل أو مخالفة الشروط ستؤدي إلى إيقاف الحساب وتجميد الأرصدة.'
+
 ROWS = [
     ['🟥 Ichancy'],
     ['💸 شحن رصيد البوت', '💰 سحب رصيد البوت'],
@@ -37,7 +39,7 @@ ROWS = [
     ['✅ السجل', '⚠️ الشروحات'],
     ['↗️ Vpn لتشغيل كامل أقسام الموقع', '↗️ ichancy apk'],
     ['💜 الشروط والأحكام'],
-    ['🟣 الجاكبوت', '💵 اللفة المجانية'],
+    ['💵 اللفة المجانية'],
     ['🎁 البونصات والعروض الحالية'],
     ['🎰 ألعاب Ichancy', '⭐ دخول مباشر للألعاب'],
     ['🌟 نقاط الولاء'],
@@ -137,6 +139,7 @@ def init():
         CREATE TABLE IF NOT EXISTS referrals_paid(user_id INTEGER PRIMARY KEY, paid_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS deposits(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, method TEXT NOT NULL, amount INTEGER NOT NULL, operation_id TEXT NOT NULL, sender_account TEXT, sender_name TEXT, status TEXT NOT NULL DEFAULT 'pending', requested_at TEXT DEFAULT CURRENT_TIMESTAMP, reviewed_by INTEGER, reviewed_at TEXT, UNIQUE(method,operation_id));
         CREATE TABLE IF NOT EXISTS sham_verified(user_id INTEGER PRIMARY KEY, account TEXT NOT NULL, holder TEXT NOT NULL, verified_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS loyalty_deposit_awards(deposit_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, points INTEGER NOT NULL, created TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS support_messages(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, body TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP);
         
         ''')
@@ -144,8 +147,13 @@ def init():
         if 'bot_balance' not in cols: c.execute('ALTER TABLE users ADD COLUMN bot_balance INTEGER NOT NULL DEFAULT 0')
         c.execute("INSERT OR IGNORE INTO settings VALUES ('enabled','1')")
         c.execute("INSERT OR IGNORE INTO settings VALUES ('bonuses','لا توجد عروض منشورة حالياً.')")
-        for key,value in [('dollar_rate','0'),('cashback','10'),('weekly_cashback','10'),('referral_reward','0'),('terms','يرجى الالتزام بشروط استخدام البوت.'),('tutorials','لا توجد شروحات منشورة حالياً.'),('vpn_url',''),('apk_url',''),('games_url',''),('direct_url',''),('contact_url',''),('jackpot','غير متاح حالياً.'),('free_spin','غير متاح حالياً.'),('current_prize','لا توجد جائزة حالية.'),('sham_codes',''),('syriatel_codes','')]:
+        for key,value in [('dollar_rate','0'),('cashback','10'),('weekly_cashback','10'),('referral_reward','0'),('terms','يرجى الالتزام بشروط استخدام البوت.'),('tutorials','لا توجد شروحات منشورة حالياً.'),('vpn_url',''),('apk_url',''),('games_url',''),('direct_url',''),('contact_url',''),('free_spin','غير متاح حالياً.'),('current_prize','لا توجد جائزة حالية.'),('sham_codes',''),('syriatel_codes','')]:
             c.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',(key,value))
+
+        # One-time terms update; later admin edits remain intact.
+        if not c.execute("SELECT 1 FROM settings WHERE key='terms_v12_applied'").fetchone():
+            c.execute("INSERT INTO settings(key,value) VALUES('terms',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (TERMS_V12,))
+            c.execute("INSERT INTO settings(key,value) VALUES('terms_v12_applied','1')")
 
 def audit(actor, action, details=''):
     with db() as c:
@@ -334,11 +342,16 @@ async def review_deposit(q:CallbackQuery):
         c.execute('UPDATE deposits SET status=?,reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?',(status,q.from_user.id,did))
         if action=='approve':
             new=add_local_balance(c,r['user_id'],r['amount'],q.from_user.id)
+            earned_points = r['amount'] // 200
+            if earned_points > 0:
+                award = c.execute('INSERT OR IGNORE INTO loyalty_deposit_awards(deposit_id,user_id,points) VALUES(?,?,?)', (did,r['user_id'],earned_points))
+                if award.rowcount:
+                    c.execute('UPDATE users SET points=points+? WHERE id=?', (earned_points,r['user_id']))
             if r['method']=='sham': c.execute('INSERT OR IGNORE INTO sham_verified(user_id,account,holder) VALUES(?,?,?)',(r['user_id'],r['sender_account'],r['sender_name']))
     await q.answer('تمت معالجة الطلب')
     try: await q.message.edit_reply_markup(reply_markup=None)
     except Exception: pass
-    try: await q.bot.send_message(r['user_id'],f'{"✅ تمت الموافقة على" if action=="approve" else "❌ تم رفض"} طلب الإيداع #{did}.' + (f'\nرصيدك الداخلي الآن: {new}' if action=='approve' else ''))
+    try: await q.bot.send_message(r['user_id'],f'{"✅ تمت الموافقة على" if action=="approve" else "❌ تم رفض"} طلب الإيداع #{did}.' + (f'\nرصيدك الداخلي الآن: {new}\n🌟 نقاط الولاء المكتسبة: {earned_points} (نقطة لكل 200 SYP جديدة)' if action=='approve' else ''))
     except Exception: pass
     await q.message.answer(f'الطلب #{did}: {status} بواسطة {q.from_user.id}.')
 
@@ -676,7 +689,7 @@ async def services(m:Message,bot:Bot):
     if m.text=='🟥 Ichancy': return await m.answer('خدمات Ichancy الخارجية غير متصلة حالياً؛ بانتظار الربط الرسمي.')
     if m.text in ('💸 شحن رصيد البوت','💰 سحب رصيد البوت'):
         return await m.answer('🔒 الخدمة غير مفعلة. لا يتم تنفيذ أي تحويل مالي قبل ربط الـ API الرسمي واختباره.')
-    lookup={'💜 الشروط والأحكام':'terms','⚠️ الشروحات':'tutorials','🟣 الجاكبوت':'jackpot','💵 اللفة المجانية':'free_spin','💌 تواصل معنا':'contact_url','↗️ Vpn لتشغيل كامل أقسام الموقع':'vpn_url','↗️ ichancy apk':'apk_url','🎰 ألعاب Ichancy':'games_url','⭐ دخول مباشر للألعاب':'direct_url'}
+    lookup={'💜 الشروط والأحكام':'terms','⚠️ الشروحات':'tutorials','💵 اللفة المجانية':'free_spin','💌 تواصل معنا':'contact_url','↗️ Vpn لتشغيل كامل أقسام الموقع':'vpn_url','↗️ ichancy apk':'apk_url','🎰 ألعاب Ichancy':'games_url','⭐ دخول مباشر للألعاب':'direct_url'}
     if m.text in lookup:
         val=setting(lookup[m.text]); return await m.answer(val or 'لم يضف الأدمن محتوى هذا القسم بعد.',reply_markup=keyboard([['🏠 القائمة الرئيسية']]))
     if m.text=='✅ السجل':
@@ -862,7 +875,7 @@ def admin_actions_keyboard():
 
 async def admin_action(message,state,user,action):
     if action in ('content','📝 إدارة المحتوى والروابط'):
-        keys=[('شروط الاستخدام','terms'),('الشروحات','tutorials'),('رابط التواصل','contact_url'),('رابط VPN','vpn_url'),('رابط APK','apk_url'),('رابط الألعاب','games_url'),('الدخول المباشر','direct_url'),('الجاكبوت','jackpot'),('اللفة المجانية','free_spin')]
+        keys=[('شروط الاستخدام','terms'),('الشروحات','tutorials'),('رابط التواصل','contact_url'),('رابط VPN','vpn_url'),('رابط APK','apk_url'),('رابط الألعاب','games_url'),('الدخول المباشر','direct_url'),('اللفة المجانية','free_spin')]
         return await message.edit_text('📝 تعديل محتوى الأقسام والروابط',reply_markup=InlineKeyboardMarkup(inline_keyboard=[*[ [InlineKeyboardButton(text=label,callback_data='ac:cfg:'+key)] for label,key in keys], [InlineKeyboardButton(text='↩️ لوحة الأدمن',callback_data=BUTTON_IDS['↩️ رجوع للوحة الأدمن'])]]))
     if action.startswith('cfg:'):
         key=action[4:]
