@@ -80,7 +80,7 @@ CODE_ADMIN_ROWS = [
     ['💳 تعديل أكواد شام كاش', '💳 تعديل أكواد سيريتل كاش'],
     ['↩️ رجوع للوحة الأدمن'],
 ]
-REFERRAL_ADMIN_ROWS = [['💰 توزيع أرباح الإحالات'], ['↩️ رجوع للوحة الأدمن']]
+REFERRAL_ADMIN_ROWS = [['⚙️ إعدادات نظام الإحالات'], ['📋 سجل إحالات البوت'], ['↩️ رجوع للوحة الأدمن']]
 ADMIN_MENUS = {
     '👥 المستخدمين': ('👥 إدارة المستخدمين', USER_ADMIN_ROWS),
     '🎁 العروض والبونصات': ('🎁 إدارة العروض والبونصات', BONUS_ADMIN_ROWS),
@@ -137,6 +137,8 @@ def init():
         CREATE TABLE IF NOT EXISTS gift_codes(code TEXT PRIMARY KEY, amount INTEGER NOT NULL, max_uses INTEGER NOT NULL DEFAULT 1, uses INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS gift_redemptions(code TEXT NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY(code,user_id));
         CREATE TABLE IF NOT EXISTS referrals_paid(user_id INTEGER PRIMARY KEY, paid_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS referral_finance(id INTEGER PRIMARY KEY AUTOINCREMENT, referred_id INTEGER NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('deposit','withdraw')), amount INTEGER NOT NULL CHECK(amount>0), activity_day TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'admin_verified', recorded_by INTEGER NOT NULL, created TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS referral_commissions(id INTEGER PRIMARY KEY AUTOINCREMENT, referrer_id INTEGER NOT NULL, referred_id INTEGER NOT NULL, amount INTEGER NOT NULL CHECK(amount>0), status TEXT NOT NULL DEFAULT 'pending', created TEXT DEFAULT CURRENT_TIMESTAMP, paid_at TEXT);
         CREATE TABLE IF NOT EXISTS deposits(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, method TEXT NOT NULL, amount INTEGER NOT NULL, operation_id TEXT NOT NULL, sender_account TEXT, sender_name TEXT, status TEXT NOT NULL DEFAULT 'pending', requested_at TEXT DEFAULT CURRENT_TIMESTAMP, reviewed_by INTEGER, reviewed_at TEXT, UNIQUE(method,operation_id));
         CREATE TABLE IF NOT EXISTS sham_verified(user_id INTEGER PRIMARY KEY, account TEXT NOT NULL, holder TEXT NOT NULL, verified_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS loyalty_deposit_awards(deposit_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, points INTEGER NOT NULL, created TEXT DEFAULT CURRENT_TIMESTAMP);
@@ -147,7 +149,7 @@ def init():
         if 'bot_balance' not in cols: c.execute('ALTER TABLE users ADD COLUMN bot_balance INTEGER NOT NULL DEFAULT 0')
         c.execute("INSERT OR IGNORE INTO settings VALUES ('enabled','1')")
         c.execute("INSERT OR IGNORE INTO settings VALUES ('bonuses','لا توجد عروض منشورة حالياً.')")
-        for key,value in [('dollar_rate','0'),('cashback','10'),('weekly_cashback','10'),('referral_reward','0'),('terms','يرجى الالتزام بشروط استخدام البوت.'),('tutorials','لا توجد شروحات منشورة حالياً.'),('vpn_url',''),('apk_url',''),('games_url',''),('direct_url',''),('contact_url',''),('free_spin','غير متاح حالياً.'),('current_prize','لا توجد جائزة حالية.'),('sham_codes',''),('syriatel_codes','')]:
+        for key,value in [('dollar_rate','0'),('cashback','10'),('weekly_cashback','10'),('referral_reward','0'),('referral_percent','5'),('referral_min_active','3'),('referral_min_transfers','3'),('referral_min_days','3'),('referral_maturity_days','7'),('referral_monthly_cap','500000'),('referral_total_cap','5000000'),('terms','يرجى الالتزام بشروط استخدام البوت.'),('tutorials','لا توجد شروحات منشورة حالياً.'),('vpn_url',''),('apk_url',''),('games_url',''),('direct_url',''),('contact_url',''),('free_spin','غير متاح حالياً.'),('current_prize','لا توجد جائزة حالية.'),('sham_codes',''),('syriatel_codes','')]:
             c.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',(key,value))
 
         # One-time terms update; later admin edits remain intact.
@@ -427,6 +429,7 @@ async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
         return await routes[label]()
     if label in ADMIN_ALL:
         return await admin_action(q.message.model_copy(update={'from_user':q.from_user}),state,q.from_user,label)
+    if label=='💸 نظام الإحالات': return await referral_screen(q.message,bot,q.from_user.id)
     if label=='💸 شحن رصيد البوت': return await deposit_menu(q.message)
     if label=='🟥 Ichancy': return await q.message.answer('خدمة Ichancy قيد الربط بالـ API الرسمي.')
     if label in ALL:
@@ -675,6 +678,56 @@ async def support_finish(m:Message,state:FSMContext):
     await state.clear()
     await m.answer('تم إرسال رسالتك.',reply_markup=keyboard(ROWS))
 
+def referral_metrics(uid):
+    # Only site transactions explicitly verified by admins are counted. Local bot deposits are NOT site play.
+    with db() as c:
+        refs=c.execute('SELECT id,first_name,username FROM users WHERE referrer=? ORDER BY joined DESC',(uid,)).fetchall()
+        summary=[]
+        for r in refs:
+            ops=c.execute('SELECT kind,amount,activity_day FROM referral_finance WHERE referred_id=?',(r['id'],)).fetchall()
+            deposits=sum(x['amount'] for x in ops if x['kind']=='deposit')
+            withdrawals=sum(x['amount'] for x in ops if x['kind']=='withdraw')
+            transfer_days={x['activity_day'] for x in ops if x['kind']=='deposit'}
+            active=len([x for x in ops if x['kind']=='deposit'])>=int(setting('referral_min_transfers') or 3) and len(transfer_days)>=int(setting('referral_min_days') or 3) and deposits>=withdrawals and deposits>0
+            suspicious=withdrawals>deposits and withdrawals>0
+            summary.append(dict(id=r['id'],name=r['first_name'] or r['username'] or str(r['id']),deposit=deposits,withdraw=withdrawals,active=active and not suspicious,suspicious=suspicious))
+        commissions=c.execute("SELECT amount,status FROM referral_commissions WHERE referrer_id=?",(uid,)).fetchall()
+    return summary,commissions
+
+def referral_keyboard():
+    labels=[('📋 نسخ رابط الدعوة','ref:copy'),('📤 مشاركة الرابط','ref:share'),('👥 تفاصيل إحالاتي','ref:details'),('💸 حالة إحالاتي','ref:status'),('📊 إحصائيات متقدمة','ref:stats'),('🏠 القائمة الرئيسية','ref:home')]
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=a,callback_data=b) for a,b in labels[i:i+2]] for i in (0,2)]+[[InlineKeyboardButton(text=labels[4][0],callback_data=labels[4][1])],[InlineKeyboardButton(text=labels[5][0],callback_data=labels[5][1])]])
+
+async def referral_screen(message,bot,uid):
+    me=await bot.get_me(); link=f'https://t.me/{me.username}?start=ref_{uid}'
+    refs,com=referral_metrics(uid); active=sum(x['active'] for x in refs); suspicious=sum(x['suspicious'] for x in refs)
+    need=int(setting('referral_min_active') or 3)
+    earned=sum(x['amount'] for x in com); paid=sum(x['amount'] for x in com if x['status']=='paid')
+    body=(f'🥉 <b>نظام الإحالات المتقدم</b> 🥉\n━━━━━━━━━━━━━━━━━━━━━\n\n🔗 <b>رابط الإحالة الخاص بك:</b>\n{link}\n\n━━━━━━━━━━━━━━━━━━━━━\n📊 <b>لوحة التحكم:</b>\n\n👥 إجمالي الإحالات: <b>{len(refs)}</b>\n✅ إحالات نشطة: <b>{active}</b> من <b>{need}</b> مطلوبة للصرف (تنقصك {max(0,need-active)})\n⏳ إحالات قيد التفعيل: <b>{len(refs)-active-suspicious}</b>\n🏅 مستواك: <b>🥉 برونزي</b>\n\n━━━━━━━━━━━━━━━━━━━━━\n💰 <b>العمولات:</b>\n\n📌 تفاصيل نسب ومبالغ العمولة متاحة للإدارة فقط\n\n━━━━━━━━━━━━━━━━━━━━━\n📌 <b>شروط استحقاق العمولة:</b>\n• يلزم {need} إحالات نشطة على الأقل\n• الإحالة تنشط بعد {setting("referral_min_transfers")} تحويلات للموقع خلال {setting("referral_min_days")} أيام مختلفة\n• الإحالة التي تسحب أكثر مما تودع تُعلّم للمراجعة ولا تُحتسب\n\n🛡️ <b>نظام الحماية:</b>\n• فترة نضج {setting("referral_maturity_days")} أيام قبل الصرف\n• الحد الشهري {setting("referral_monthly_cap")} NSP لكل إحالة\n• مراجعة العمليات المشبوهة من الإدارة\n\n━━━━━━━━━━━━━━━━━━━━━\n💡 <b>كيف يعمل النظام:</b>\n1️⃣ شارك رابطك مع أصدقائك\n2️⃣ يسجّلون عبر الرابط\n3️⃣ تتحقق الإدارة من نشاطهم على الموقع\n4️⃣ الإدارة تسجّل وتوزّع العمولات وفق سجلات موثّقة')
+    await message.answer(body,parse_mode='HTML',reply_markup=referral_keyboard())
+
+@router.callback_query(F.data.startswith('ref:'))
+async def referral_click(q:CallbackQuery,bot:Bot,state:FSMContext):
+    if not await require_join(bot,q.from_user.id,q.message): return await q.answer()
+    await q.answer(); action=q.data[4:]; uid=q.from_user.id
+    me=await bot.get_me(); link=f'https://t.me/{me.username}?start=ref_{uid}'
+    if action=='home': return await home(q.message)
+    if action=='copy': return await q.message.answer('📋 رابطك للنسخ:\n'+link)
+    if action=='share': return await q.message.answer('📤 شارك الرابط التالي مع أصدقائك:\n'+link)
+    refs,com=referral_metrics(uid)
+    if action=='details':
+        if not refs: return await q.message.answer('📭 لا توجد إحالات بعد.\nشارك رابطك لبدء كسب العمولات!')
+        lines=['👥 تفاصيل إحالاتي']
+        for r in refs[:30]: lines.append(f"• {r['name']} ({r['id']}) — {'🔴 قيد المراجعة' if r['suspicious'] else '🟢 نشطة' if r['active'] else '🟡 قيد التفعيل'}")
+        return await q.message.answer('\n'.join(lines))
+    if action=='status':
+        active=sum(r['active'] for r in refs); need=int(setting('referral_min_active') or 3)
+        return await q.message.answer(f'💸 حالة الإحالات\nالإحالات النشطة: {active}/{need}\nتُدار تفاصيل العمولات من لوحة الإدارة فقط.')
+    if action=='stats':
+        d=sum(r['deposit'] for r in refs); w=sum(r['withdraw'] for r in refs); net=max(0,d-w)
+        e=sum(c['amount'] for c in com); paid=sum(c['amount'] for c in com if c['status']=='paid')
+        return await q.message.answer(f'📊 <b>إحصائيات متقدمة</b>\n━━━━━━━━━━━━━━━━━━━━━\n📈 <b>ملخص مالي (عمليات موقع موثقة إدارياً):</b>\n💸 إجمالي ما أودعه المُحالون للموقع: {d} NSP\n💰 إجمالي ما سحبوه من الموقع: {w} NSP\n📉 الخسارة الصافية الإجمالية: {net} NSP\n📊 متوسط الخسارة لكل إحالة: {net//len(refs) if refs else 0} NSP\n━━━━━━━━━━━━━━━━━━━━━\n💰 <b>ملخص العمولات:</b>\n🔒 تفاصيل العمولات خاصة بالإدارة\n━━━━━━━━━━━━━━━━━━━━━\n👥 <b>حالة الإحالات:</b>\n🟢 نشطة: {sum(r["active"] for r in refs)} | 🟡 قيد التفعيل: {sum(not r["active"] and not r["suspicious"] for r in refs)} | 🔴 موقوفة/مشبوهة: {sum(r["suspicious"] for r in refs)}\n━━━━━━━━━━━━━━━━━━━━━\n📅 حد أقصى شهري: {setting("referral_monthly_cap")} NSP / إحالة\n🏆 حد أقصى كلي: {setting("referral_total_cap")} NSP / إحالة',parse_mode='HTML')
+
 @router.message(F.text.in_(ALL))
 async def services(m:Message,bot:Bot):
     save(m.from_user)
@@ -682,9 +735,7 @@ async def services(m:Message,bot:Bot):
     if u and u['banned']: return await m.answer('حسابك محظور من استخدام الخدمات.')
     if setting('enabled')!='1' and not admin(m.from_user): return await m.answer('البوت متوقف مؤقتاً.')
     if m.text=='💸 نظام الإحالات':
-        me=await bot.get_me()
-        with db() as c: n=c.execute('SELECT COUNT(*) n FROM users WHERE referrer=?',(m.from_user.id,)).fetchone()['n']
-        return await m.answer(f'https://t.me/{me.username}?start=ref_{m.from_user.id}\nعدد الإحالات: {n}\nلا توجد أرباح تلقائية مفعلة.')
+        return await referral_screen(m,bot,m.from_user.id)
     if m.text=='🎁 البونصات والعروض الحالية': return await m.answer(setting('bonuses'))
     if m.text=='🟥 Ichancy': return await m.answer('خدمات Ichancy الخارجية غير متصلة حالياً؛ بانتظار الربط الرسمي.')
     if m.text in ('💸 شحن رصيد البوت','💰 سحب رصيد البوت'):
@@ -887,6 +938,12 @@ async def admin_action(message,state,user,action):
         await state.set_state(Input.admin_config)
         await state.update_data(config_key=key)
         return await message.answer(prompt)
+    if action=='⚙️ إعدادات نظام الإحالات':
+        fields=[('نسبة العمولة (للأدمن فقط)','referral_percent'),('الحد الأدنى للإحالات النشطة','referral_min_active'),('عدد تحويلات التفعيل','referral_min_transfers'),('عدد أيام النشاط','referral_min_days'),('فترة النضج بالأيام','referral_maturity_days'),('السقف الشهري','referral_monthly_cap'),('السقف الكلي','referral_total_cap')]
+        return await message.answer('⚙️ إعدادات الإحالات — خاصة بالإدارة\n'+'\n'.join(f'{title}: {setting(key)}' for title,key in fields),reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=title,callback_data='ac:cfg:'+key)] for title,key in fields]))
+    if action=='📋 سجل إحالات البوت':
+        with db() as c: rows=c.execute('SELECT referrer,COUNT(*) n FROM users WHERE referrer IS NOT NULL GROUP BY referrer ORDER BY n DESC LIMIT 20').fetchall()
+        return await message.answer('📋 عدد الإحالات المسجلة\n'+('\n'.join(str(r['referrer'])+': '+str(r['n']) for r in rows) or 'لا توجد إحالات.'))
     if action=='🎟️ إضافة كود':
         await state.set_state(Input.admin_code)
         return await message.answer('🎟️ أرسل اسم الكود فقط، مثال: code\nسيُضاف اسم Sheikh تلقائياً للكود.')
@@ -917,10 +974,10 @@ async def admin_config_finish(m:Message,state:FSMContext):
     if not admin(m.from_user): return
     data=await state.get_data(); key=data['config_key']; value=(m.text or '').strip()
     if not value or len(value)>3500: return await m.answer('أرسل قيمة نصية لا تتجاوز 3500 حرف.')
-    if key in ('dollar_rate','cashback','referral_reward'):
+    if key in ('dollar_rate','cashback','referral_reward','referral_percent','referral_min_active','referral_min_transfers','referral_min_days','referral_maturity_days','referral_monthly_cap','referral_total_cap'):
         try:
             v=float(value)
-            if v<0 or (key=='cashback' and v>100): raise ValueError()
+            if v<0 or (key in ('cashback','referral_percent') and v>100) or (key.startswith('referral_') and key!='referral_percent' and not v.is_integer()): raise ValueError()
         except ValueError: return await m.answer('القيمة الرقمية غير صحيحة.')
     with db() as c: c.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,value))
     audit(m.from_user.id,'config_updated',key)
