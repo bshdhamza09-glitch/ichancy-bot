@@ -21,7 +21,7 @@ ADMIN_IDS = {int(x.strip()) for x in os.getenv('ADMIN_IDS', '').split(',') if x.
 DB = Path(os.getenv('DATABASE_PATH', str(Path(__file__).with_name('sheikh.db'))))
 GIF = Path(__file__).with_name('welcome.gif')
 router = Router()
-LOYALTY_EXCHANGES = {1: (1, 2), 6: (6, 20), 12: (12, 50)}  # points -> local SYP bot credit
+LOYALTY_EXCHANGES_DEFAULT = {1: 2, 6: 20, 12: 50}  # points -> local SYP bot credit
 REQUIRED_CHANNEL = os.getenv('REQUIRED_CHANNEL', '@IchancyElSheikh').strip()
 DEPOSIT_CHAT_ID = os.getenv('DEPOSIT_CHAT_ID', '').strip()
 SUPPORT_CHAT_ID = os.getenv('SUPPORT_CHAT_ID', '-1004401691217').strip()
@@ -66,8 +66,8 @@ BONUS_ADMIN_ROWS = [
     ['↩️ رجوع للوحة الأدمن'],
 ]
 LOYALTY_ADMIN_ROWS = [
-    ['➕ منح نقاط ولاء', '🎁 إنشاء جائزة ولاء'],
-    ['⚡ تعجيل جوائز نقاط الولاء'],
+    ['➕ منح نقاط ولاء'],
+    ['🎁 تعديل جوائز نقاط الولاء'],
     ['↩️ رجوع للوحة الأدمن'],
 ]
 SETTINGS_ADMIN_ROWS = [
@@ -100,6 +100,7 @@ class Input(StatesGroup):
     lookup = State()
     loyalty_add = State()
     loyalty_reward = State()
+    loyalty_prize_edit = State()
     loyalty_claim = State()
     award_id = State()
     ban = State()
@@ -147,6 +148,8 @@ def init():
         CREATE TABLE IF NOT EXISTS sham_verified(user_id INTEGER PRIMARY KEY, account TEXT NOT NULL, holder TEXT NOT NULL, verified_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS loyalty_deposit_awards(deposit_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, points INTEGER NOT NULL, created TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS support_messages(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, body TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS support_thread_map(chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY(chat_id,message_id));
+        CREATE TABLE IF NOT EXISTS loyalty_exchange_options(points INTEGER PRIMARY KEY, credit INTEGER NOT NULL CHECK(credit>0), active INTEGER NOT NULL DEFAULT 1);
         
         ''')
         cols={r[1] for r in c.execute('PRAGMA table_info(users)')}
@@ -155,6 +158,9 @@ def init():
         c.execute("INSERT OR IGNORE INTO settings VALUES ('bonuses','لا توجد عروض منشورة حالياً.')")
         for key,value in [('dollar_rate','0'),('cashback','10'),('weekly_cashback','10'),('referral_reward','0'),('referral_percent','5'),('referral_min_active','3'),('referral_min_transfers','3'),('referral_min_days','3'),('referral_maturity_days','7'),('referral_monthly_cap','500000'),('referral_total_cap','5000000'),('terms','يرجى الالتزام بشروط استخدام البوت.'),('tutorials','لا توجد شروحات منشورة حالياً.'),('vpn_url',''),('apk_url',''),('games_url',''),('direct_url',''),('contact_url',''),('free_spin','غير متاح حالياً.'),('current_prize','لا توجد جائزة حالية.'),('sham_codes',''),('syriatel_codes','')]:
             c.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',(key,value))
+
+        for points,credit in LOYALTY_EXCHANGES_DEFAULT.items():
+            c.execute('INSERT OR IGNORE INTO loyalty_exchange_options(points,credit,active) VALUES(?,?,1)',(points,credit))
 
         # One-time terms update; later admin edits remain intact.
         if not c.execute("SELECT 1 FROM settings WHERE key='terms_v12_applied'").fetchone():
@@ -440,7 +446,7 @@ async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
         '🎁 استبدال نقاط': lambda: claim_start(m, state),
 
         '➕ منح نقاط ولاء': lambda: add_start(m, state),
-        '🎁 إنشاء جائزة ولاء': lambda: reward_start(m, state),
+        '🎁 تعديل جوائز نقاط الولاء': lambda: loyalty_prizes_admin(m, state),
         '⚡ تعجيل جوائز نقاط الولاء': lambda: awards(m, state),
         '👥 المستخدمين': lambda: users(m),
         '📊 تقرير': lambda: report(m),
@@ -492,40 +498,44 @@ async def go_home(m:Message,state:FSMContext):
     await state.clear()
     await home(m)
 
+def loyalty_options():
+    with db() as c:
+        return c.execute('SELECT points,credit FROM loyalty_exchange_options WHERE active=1 ORDER BY points').fetchall()
+
 def loyalty_exchange_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='💎 1 نقطة', callback_data='loyalty:1')],
-        [InlineKeyboardButton(text='💎 6 نقاط', callback_data='loyalty:6')],
-        [InlineKeyboardButton(text='💎 12 نقطة', callback_data='loyalty:12')],
-        [InlineKeyboardButton(text='💝 عودة', callback_data=BUTTON_IDS['🏠 القائمة الرئيسية'])],
-    ])
+    rows=[[InlineKeyboardButton(text=f'💎 {r["points"]} نقطة',callback_data=f'loyalty:{r["points"]}')] for r in loyalty_options()]
+    rows.append([InlineKeyboardButton(text='💝 عودة',callback_data=BUTTON_IDS['🏠 القائمة الرئيسية'])])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 @router.message(F.text == '🌟 نقاط الولاء')
 async def loyalty(m:Message):
     save(m.from_user)
     with db() as c:
         u=c.execute('SELECT points,bot_balance FROM users WHERE id=?',(m.from_user.id,)).fetchone()
-    await m.answer(
-        '🎊 قائمة استبدال الجواهر بالرصيد:\n\n'
-        '💎 1 جوهرة   ⏪   💰 2 ليرة سورية رصيد\n'
-        '💎 6 جواهر   ⏪   💰 20 ليرة سورية رصيد\n'
-        '💎 12 جوهرة  ⏪   💰 50 ليرة سورية رصيد\n\n'
-        'اضغط على الخيار المناسب لك من الأسفل للاستبدال الفوري\n\n'
-        f'🌟 نقاطك المتاحة: {u["points"]:,}\n'
-        f'💰 رصيد البوت الداخلي: {u["bot_balance"]:,} ل.س',
-        reply_markup=loyalty_exchange_keyboard())
+    offers=loyalty_options()
+    menu='\n'.join(f'💎 {r["points"]} نقطة ⏪ 💰 {r["credit"]:,} ليرة سورية رصيد' for r in offers) or 'لا توجد جوائز متاحة حالياً.'
+    await m.answer('🎊 قائمة استبدال الجواهر بالرصيد:\n\n'+menu+'\n\nاضغط على الخيار المناسب لك من الأسفل للاستبدال الفوري\n\n'+f'🌟 نقاطك المتاحة: {u["points"]:,}\n💰 رصيد البوت الداخلي: {u["bot_balance"]:,} ل.س',reply_markup=loyalty_exchange_keyboard())
 
 async def loyalty_exchange(q:CallbackQuery):
     try:
         cost=int(q.data.split(':',1)[1])
     except (ValueError,IndexError):
         return await q.answer('خيار غير صالح',show_alert=True)
-    if cost not in LOYALTY_EXCHANGES:
-        return await q.answer('خيار غير صالح',show_alert=True)
-    _,credit=LOYALTY_EXCHANGES[cost]
+    # Prize must be read from DB, not a hardcoded menu.
+    with db() as c:
+        option=c.execute('SELECT credit FROM loyalty_exchange_options WHERE points=? AND active=1',(cost,)).fetchone()
+    if not option:
+        return await q.answer('الجائزة غير متاحة حالياً',show_alert=True)
+    credit=option['credit']
     # A single IMMEDIATE transaction protects points and credit against concurrent clicks.
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
+        # Recheck the option under the same write transaction to avoid stale prize values.
+        option=c.execute('SELECT credit FROM loyalty_exchange_options WHERE points=? AND active=1',(cost,)).fetchone()
+        if not option:
+            c.rollback()
+            return await q.answer('الجائزة تغيّرت، افتح القائمة مجدداً',show_alert=True)
+        credit=option['credit']
         changed=c.execute('UPDATE users SET points=points-? WHERE id=? AND points>=?',
                           (cost,q.from_user.id,cost)).rowcount
         if not changed:
@@ -574,7 +584,7 @@ async def loyalty_admin(m:Message):
         pending=c.execute("SELECT COUNT(*) n FROM claims WHERE status='pending'").fetchone()['n']
         rewards=c.execute('SELECT id,title,cost,active FROM rewards ORDER BY id DESC LIMIT 12').fetchall()
     txt='\n'.join(f"#{r['id']} {r['title']} — {r['cost']} نقطة {'🟢' if r['active'] else '🔴'}" for r in rewards) or 'لا توجد جوائز'
-    await m.answer(f'🌟 إدارة الولاء\nطلبات معلّقة: {pending}\n{txt}',reply_markup=keyboard(LOYALTY_ADMIN_ROWS))
+    await m.answer('🌟 إدارة نقاط الولاء\nيمكنك منح نقاط أو تعديل جوائز الاستبدال الفوري.',reply_markup=keyboard(LOYALTY_ADMIN_ROWS))
 
 @router.message(F.text == '➕ منح نقاط ولاء')
 async def add_start(m:Message,state:FSMContext):
@@ -596,6 +606,38 @@ async def add_finish(m:Message,state:FSMContext):
     await notify_user(m.bot,uid,f'🌟 أضافت الإدارة {pts} نقطة ولاء لحسابك.')
     await state.clear()
     await m.answer(f'تمت إضافة {pts} نقطة للمستخدم {uid}.',reply_markup=keyboard(LOYALTY_ADMIN_ROWS))
+
+@router.message(F.text == '🎁 تعديل جوائز نقاط الولاء')
+async def loyalty_prizes_admin(m:Message,state:FSMContext):
+    if not admin(m.from_user): return
+    await state.set_state(Input.loyalty_prize_edit)
+    offers=loyalty_options()
+    listing='\n'.join(f'💎 {r["points"]} نقطة = {r["credit"]} ل.س' for r in offers)
+    await m.answer('🎁 تعديل جوائز الولاء\n'+listing+'\n\nلإضافة أو تعديل جائزة أرسل: عدد_النقاط قيمة_الرصيد\nمثال: 6 20\nلحذف جائزة أرسل: حذف 6\nللخروج اكتب /cancel',reply_markup=back())
+
+@router.message(Input.loyalty_prize_edit)
+async def loyalty_prizes_edit(m:Message,state:FSMContext):
+    if not admin(m.from_user): return
+    parts=(m.text or '').strip().split()
+    try:
+        if len(parts)==2 and parts[0]=='حذف':
+            points=int(parts[1]); assert points>0
+            with db() as c:
+                c.execute('BEGIN IMMEDIATE')
+                n=c.execute('UPDATE loyalty_exchange_options SET active=0 WHERE points=? AND active=1',(points,)).rowcount
+            if not n: return await m.answer('الجائزة غير موجودة.')
+            audit(m.from_user.id,'loyalty_prize_disabled',str(points))
+            return await m.answer(f'✅ تم إخفاء جائزة {points} نقطة. أرسل تعديلاً آخر أو /cancel.')
+        if len(parts)!=2: raise ValueError()
+        points,credit=map(int,parts)
+        if not (1<=points<=1000000 and 1<=credit<=100000000): raise ValueError()
+    except (ValueError,AssertionError):
+        return await m.answer('صيغة غير صحيحة. مثال: 12 50 أو حذف 12')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        c.execute('INSERT INTO loyalty_exchange_options(points,credit,active) VALUES(?,?,1) ON CONFLICT(points) DO UPDATE SET credit=excluded.credit,active=1',(points,credit))
+    audit(m.from_user.id,'loyalty_prize_changed',f'{points}:{credit}')
+    await m.answer(f'✅ تم حفظ الجائزة: {points} نقطة مقابل {credit} ل.س\nأرسل تعديلاً آخر أو /cancel.')
 
 @router.message(F.text == '🎁 إنشاء جائزة ولاء')
 async def reward_start(m:Message,state:FSMContext):
@@ -796,7 +838,9 @@ async def support_action(q:CallbackQuery,state:FSMContext,bot:Bot):
           f'🔗 اسم المستخدم: {escape(username)}\n\n'
           f'💬 <b>الرسالة:</b>\n{escape(body)}')
     try:
-        await bot.send_message(int(SUPPORT_CHAT_ID),text,parse_mode='HTML')
+        delivered=await bot.send_message(int(SUPPORT_CHAT_ID),text,parse_mode='HTML')
+        with db() as c:
+            c.execute('INSERT OR REPLACE INTO support_thread_map(chat_id,message_id,user_id) VALUES(?,?,?)',(delivered.chat.id,delivered.message_id,sender.id))
     except Exception:
         logging.exception('Failed to deliver support message to %s',SUPPORT_CHAT_ID)
         return await q.answer('تعذر الإرسال إلى مجموعة الدعم. حاول لاحقاً.',show_alert=True)
@@ -1089,7 +1133,7 @@ async def admin_action(message,state,user,action):
         return await message.answer('✅ البوت مفعّل' if v=='1' else '⏸️ البوت متوقف للمستخدمين')
     if action=='🌟 إدارة نقاط الولاء': return await message.answer('🌟 لوحة الولاء',reply_markup=keyboard(LOYALTY_ADMIN_ROWS))
     if action=='➕ منح نقاط ولاء': return await add_start(message,state)
-    if action=='🎁 إنشاء جائزة ولاء': return await reward_start(message,state)
+    if action=='🎁 تعديل جوائز نقاط الولاء': return await loyalty_prizes_admin(message,state)
     if action=='⚡ تعجيل جوائز نقاط الولاء': return await awards(message,state)
     if action=='📢 الإذاعة': return await broadcast_start(message,state)
     if action=='📝 تعديل نص البونصات والعروض الحالية': return await bonus_start(message,state)
@@ -1164,6 +1208,33 @@ async def notify_user(bot, uid, text):
 async def admin_search_start(m,state):
     await state.set_state(Input.lookup)
     await m.answer('أرسل Telegram ID أو اسم المستخدم للبحث.')
+
+async def handle_support_reply(m:Message):
+    # Telegram groups: reply directly to the forwarded support message.
+    # A channel post can only be answered by a channel administrator via channel posting.
+    if not SUPPORT_CHAT_ID or str(m.chat.id)!=SUPPORT_CHAT_ID: return
+    if not m.reply_to_message or not m.text or not m.text.strip(): return
+    if m.from_user and m.from_user.is_bot: return
+    # For group replies, require explicit admin ID; for channel posts, the channel identity is the sender.
+    is_channel=m.chat.type=='channel'
+    if not is_channel and (not m.from_user or m.from_user.id not in ADMIN_IDS): return
+    with db() as c:
+        target=c.execute('SELECT user_id FROM support_thread_map WHERE chat_id=? AND message_id=?',(m.chat.id,m.reply_to_message.message_id)).fetchone()
+    if not target: return
+    try:
+        await m.bot.send_message(target['user_id'],'💬 رد فريق الدعم على رسالتك:\n\n'+m.text[:3800])
+    except Exception:
+        logging.exception('Support reply delivery failed')
+        return await m.reply('❌ تعذّر إيصال الرد للمستخدم. قد يكون حظر البوت.')
+    await m.reply('✅ تم إرسال الرد للمستخدم.')
+
+@router.message(F.chat.id == int(SUPPORT_CHAT_ID) if SUPPORT_CHAT_ID.lstrip('-').isdigit() else F.chat.id == 0)
+async def support_group_reply(m:Message):
+    await handle_support_reply(m)
+
+@router.channel_post()
+async def support_channel_reply(m:Message):
+    await handle_support_reply(m)
 
 @router.message()
 async def fallback(m:Message):
