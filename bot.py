@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from aiogram import Bot, Dispatcher, F, Router
+from aiogram import Bot, Dispatcher, F, Router, BaseMiddleware
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -21,6 +21,12 @@ ADMIN_IDS = {int(x.strip()) for x in os.getenv('ADMIN_IDS', '').split(',') if x.
 DB = Path(os.getenv('DATABASE_PATH', str(Path(__file__).with_name('sheikh.db'))))
 GIF = Path(__file__).with_name('welcome.gif')
 router = Router()
+REQUIRED_CHANNEL = os.getenv('REQUIRED_CHANNEL', '@IchancyElSheikh').strip()
+DEPOSIT_CHAT_ID = os.getenv('DEPOSIT_CHAT_ID', '').strip()
+SHAM_ACCOUNT = os.getenv('SHAM_ACCOUNT', 'bbcbfd15ad74579eb0b8e9baca872e57').strip()
+SYRIATEL_ACCOUNT = os.getenv('SYRIATEL_ACCOUNT', '0933185350').strip()
+QR = Path(__file__).with_name('sham_qr.jpg')
+
 
 ROWS = [
     ['🟥 Ichancy'],
@@ -106,6 +112,10 @@ class Input(StatesGroup):
     admin_code_amount = State()
     admin_code_uses = State()
     admin_search = State()
+    deposit_amount = State()
+    deposit_reference = State()
+    deposit_sender = State()
+
 
 def db():
     DB.parent.mkdir(parents=True, exist_ok=True)
@@ -125,6 +135,8 @@ def init():
         CREATE TABLE IF NOT EXISTS gift_codes(code TEXT PRIMARY KEY, amount INTEGER NOT NULL, max_uses INTEGER NOT NULL DEFAULT 1, uses INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS gift_redemptions(code TEXT NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY(code,user_id));
         CREATE TABLE IF NOT EXISTS referrals_paid(user_id INTEGER PRIMARY KEY, paid_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS deposits(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, method TEXT NOT NULL, amount INTEGER NOT NULL, operation_id TEXT NOT NULL, sender_account TEXT, sender_name TEXT, status TEXT NOT NULL DEFAULT 'pending', requested_at TEXT DEFAULT CURRENT_TIMESTAMP, reviewed_by INTEGER, reviewed_at TEXT, UNIQUE(method,operation_id));
+        CREATE TABLE IF NOT EXISTS sham_verified(user_id INTEGER PRIMARY KEY, account TEXT NOT NULL, holder TEXT NOT NULL, verified_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS support_messages(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, body TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP);
         
         ''')
@@ -168,6 +180,151 @@ def back():
 def admin(u):
     return u and u.id in ADMIN_IDS
 
+async def joined(bot, uid):
+    if uid in ADMIN_IDS: return True
+    try:
+        member=await bot.get_chat_member(REQUIRED_CHANNEL,uid)
+        return member.status in ('creator','administrator','member') or (member.status=='restricted' and member.is_member)
+    except Exception:
+        logging.exception('Cannot check channel membership; ensure bot is admin in channel')
+        return False
+
+def join_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='📢 اشترك بالقناة',url='https://t.me/IchancyElSheikh')],
+        [InlineKeyboardButton(text='✅ تحقّق من الاشتراك',callback_data='verify_join')]])
+
+async def require_join(bot,uid,message):
+    if await joined(bot,uid): return True
+    await message.answer('🔒 لازم تشترك بالقناة أولاً حتى تستخدم البوت.',reply_markup=join_keyboard())
+    return False
+
+async def deposit_menu(m):
+    await m.answer('💰 اختر طريقة شحن الرصيد الداخلي (مراجعة يدوية):',reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='🟢 شام كاش',callback_data='dep:sham')],
+        [InlineKeyboardButton(text='📱 سيريتل كاش',callback_data='dep:syriatel')],
+        [InlineKeyboardButton(text='↩️ الرئيسية',callback_data=BUTTON_IDS['🏠 القائمة الرئيسية'])]]))
+
+async def deposit_instructions(m,method,uid):
+    if method=='sham':
+        with db() as c: row=c.execute('SELECT account,holder FROM sham_verified WHERE user_id=?',(uid,)).fetchone()
+        bound=f'{row["account"]} — {row["holder"]}' if row else '— (يُثبَّت بعد مراجعة أول إيداع)'
+        msg=(f'📸 امسح رمز الـ QR للدفع مباشرة عبر ShamCash.\n\nأو أرسل المبلغ إلى الحساب التالي:\n{SHAM_ACCOUNT}\n\nبعد إتمام التحويل، اضغط على الزر أدناه.\n\n⚠️ تأكد من الدفع بالليرة السورية الجديدة (SYP) حصراً.\nلا يتم قبول الدفع بالليرة السورية القديمة.\n\n🔐 حساب شام كاش واحد للإيداع والسحب\nيُثبَّت حساب شام كاش الذي تودع منه بعد تحقق الإدارة من أول إيداع بهوية ظاهرة، ويصبح الحساب الوحيد للإيداع والسحب.\n⚠️ يُمنع إخفاء هوية المرسِل. أي إيداع من حساب آخر أو بهوية مخفية يُحوَّل لمراجعة الإدارة.\n\n🏦 عنوان السحب المعتمد لديك: {bound}')
+        if QR.exists(): await m.answer_photo(FSInputFile(QR),caption='📸 رمز ShamCash للدفع')
+    else: msg=f'📱 سيريتل كاش\nحوّل إلى الرقم: {SYRIATEL_ACCOUNT}\nبالليرة السورية الجديدة فقط. بعد التحويل اضغط الزر لإرسال طلب مراجعة.'
+    await m.answer(msg,reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ أتممت التحويل',callback_data=f'depgo:{method}')]]))
+
+async def send_deposit_to_admins(bot,deposit_id):
+    with db() as c:
+        r=c.execute('SELECT d.*,u.username,u.first_name FROM deposits d JOIN users u ON u.id=d.user_id WHERE d.id=?',(deposit_id,)).fetchone()
+    if not r: return
+    text=(f'📥 طلب إيداع #{deposit_id}\n👤 {r["first_name"]} (@{r["username"] or "بدون_يوزر"})\n🆔 {r["user_id"]}\n💳 الطريقة: {r["method"]}\n💰 المبلغ: {r["amount"]} SYP جديدة\n🔢 رقم العملية: {r["operation_id"]}\n🏦 حساب المرسل: {r["sender_account"] or "—"}\n👤 اسم صاحب الحساب: {r["sender_name"] or "—"}\n🕒 وقت الطلب UTC: {r["requested_at"]}\n⏳ بانتظار تحقق الإدارة من وصول المبلغ وهوية المرسل')
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ تأكيد الإيداع',callback_data=f'dreview:{deposit_id}:approve'),InlineKeyboardButton(text='❌ رفض',callback_data=f'dreview:{deposit_id}:reject')]])
+    targets=[]
+    if DEPOSIT_CHAT_ID: targets.append(DEPOSIT_CHAT_ID)
+    targets.extend(ADMIN_IDS)
+    sent=False
+    for dest in dict.fromkeys(targets):
+        try: await bot.send_message(dest,text,reply_markup=kb);sent=True
+        except Exception: logging.exception('Failed to send deposit to %s',dest)
+    return sent
+
+@router.callback_query(F.data=='verify_join')
+async def verify_join(q:CallbackQuery):
+    if await joined(q.bot,q.from_user.id):
+        await q.answer('تم التحقق',show_alert=True)
+        save(q.from_user)
+        await home(q.message)
+    else: await q.answer('ما قدرنا نتحقق من الاشتراك. تأكد إنك مشترك وإن البوت أدمن بالقناة.',show_alert=True)
+
+@router.callback_query(F.data.startswith('dep:'))
+async def select_deposit(q:CallbackQuery):
+    await q.answer()
+    if not await require_join(q.bot,q.from_user.id,q.message): return
+    await deposit_instructions(q.message,q.data.split(':')[1],q.from_user.id)
+
+@router.callback_query(F.data.startswith('depgo:'))
+async def begin_deposit(q:CallbackQuery,state:FSMContext):
+    await q.answer()
+    if not await require_join(q.bot,q.from_user.id,q.message): return
+    method=q.data.split(':')[1]
+    await state.set_state(Input.deposit_amount)
+    await state.update_data(deposit_method=method)
+    await q.message.answer('💰 اكتب المبلغ المحوّل بالليرة السورية الجديدة (رقم صحيح موجب):')
+
+@router.message(Input.deposit_amount)
+async def deposit_amount(m:Message,state:FSMContext):
+    try:
+        amount=int((m.text or '').strip())
+        if amount<=0 or amount>1000000000: raise ValueError()
+    except ValueError: return await m.answer('اكتب مبلغ صحيح موجب.')
+    await state.update_data(deposit_amount=amount)
+    await state.set_state(Input.deposit_reference)
+    await m.answer('🔢 أرسل رقم عملية التحويل الموجود في إيصال الدفع:')
+
+@router.message(Input.deposit_reference)
+async def deposit_reference(m:Message,state:FSMContext):
+    ref=(m.text or '').strip()
+    if not 3<=len(ref)<=100: return await m.answer('أرسل رقم عملية صحيح (3 إلى 100 حرف).')
+    await state.update_data(deposit_reference=ref)
+    data=await state.get_data()
+    if data['deposit_method']=='sham':
+        await state.set_state(Input.deposit_sender)
+        await m.answer('🏦 أرسل كود حساب شام كاش الذي حولت منه، ثم فاصلة | ثم الاسم الظاهر لصاحب الحساب. مثال: account123 | أحمد محمد\n⚠️ هذه البيانات تصريح منك، وستتحقق الإدارة منها في إيصال التحويل.')
+    else: await finish_deposit(m,state)
+
+@router.message(Input.deposit_sender)
+async def deposit_sender(m:Message,state:FSMContext):
+    parts=(m.text or '').split('|',1)
+    if len(parts)!=2 or not all(p.strip() for p in parts): return await m.answer('أرسل: كود حسابك | اسم صاحب الحساب')
+    if len(parts[0].strip())>150 or len(parts[1].strip())>150: return await m.answer('البيانات طويلة جداً.')
+    await state.update_data(sender_account=parts[0].strip(),sender_name=parts[1].strip())
+    await finish_deposit(m,state)
+
+async def finish_deposit(m,state):
+    data=await state.get_data()
+    await state.clear()
+    if not await require_join(m.bot,m.from_user.id,m): return
+    save(m.from_user)
+    try:
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            bound=c.execute('SELECT account FROM sham_verified WHERE user_id=?',(m.from_user.id,)).fetchone()
+            if data['deposit_method']=='sham' and bound and bound['account']!=data.get('sender_account'):
+                raise ValueError('حساب شام كاش مختلف عن الحساب المعتمد. تواصل مع الإدارة لمراجعة الحالة؛ لم يُنشأ طلب تلقائي.')
+            cur=c.execute('INSERT INTO deposits(user_id,method,amount,operation_id,sender_account,sender_name) VALUES(?,?,?,?,?,?)',
+                          (m.from_user.id,data['deposit_method'],data['deposit_amount'],data['deposit_reference'],data.get('sender_account'),data.get('sender_name')))
+            did=cur.lastrowid
+    except sqlite3.IntegrityError: return await m.answer('⚠️ رقم العملية مستخدم مسبقاً لهذه الطريقة. تواصل مع الإدارة.')
+    except ValueError as e: return await m.answer(str(e))
+    sent=await send_deposit_to_admins(m.bot,did)
+    await m.answer(f'📥 تم تسجيل طلبك رقم #{did} للمراجعة اليدوية. لن يُضاف الرصيد إلا بعد تحقق الإدارة من التحويل.' + ('' if sent else '\n⚠️ تعذر إرسال إشعار الإدارة، تواصل مع الدعم.'))
+
+@router.callback_query(F.data.startswith('dreview:'))
+async def review_deposit(q:CallbackQuery):
+    if not admin(q.from_user): return await q.answer('غير مصرح',show_alert=True)
+    _,sid,action=q.data.split(':')
+    did=int(sid)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        r=c.execute('SELECT * FROM deposits WHERE id=?',(did,)).fetchone()
+        if not r or r['status']!='pending': return await q.answer('الطلب تمت معالجته مسبقاً',show_alert=True)
+        if action=='approve' and r['method']=='sham':
+            bound=c.execute('SELECT account FROM sham_verified WHERE user_id=?',(r['user_id'],)).fetchone()
+            if bound and bound['account']!=r['sender_account']: return await q.answer('حساب شام كاش مختلف! رفض التفعيل.',show_alert=True)
+            if not r['sender_account'] or not r['sender_name']: return await q.answer('هوية المرسل ناقصة',show_alert=True)
+        status='approved' if action=='approve' else 'rejected'
+        c.execute('UPDATE deposits SET status=?,reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?',(status,q.from_user.id,did))
+        if action=='approve':
+            new=add_local_balance(c,r['user_id'],r['amount'],q.from_user.id)
+            if r['method']=='sham': c.execute('INSERT OR IGNORE INTO sham_verified(user_id,account,holder) VALUES(?,?,?)',(r['user_id'],r['sender_account'],r['sender_name']))
+    await q.answer('تمت معالجة الطلب')
+    try: await q.message.edit_reply_markup(reply_markup=None)
+    except Exception: pass
+    try: await q.bot.send_message(r['user_id'],f'{"✅ تمت الموافقة على" if action=="approve" else "❌ تم رفض"} طلب الإيداع #{did}.' + (f'\nرصيدك الداخلي الآن: {new}' if action=='approve' else ''))
+    except Exception: pass
+    await q.message.answer(f'الطلب #{did}: {status} بواسطة {q.from_user.id}.')
+
 async def home(m, welcome=False):
     msg=f'🏠 أهلاً بك في بوت {NAME}\nاختر الخدمة من القائمة التالية 👇'
     if welcome and GIF.exists() and os.getenv('SEND_WELCOME_GIF','0')=='1':
@@ -179,6 +336,9 @@ async def home(m, welcome=False):
 
 @router.callback_query(F.data.startswith(('btn_', 'ul:', 'ud:', 'ua:', 'uc:', 'ac:', 'gift:')))
 async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
+    if not admin(q.from_user) and not await require_join(bot,q.from_user.id,q.message):
+        await q.answer()
+        return
     if q.data.startswith(('ul:', 'ud:', 'ua:', 'uc:')):
         if not admin(q.from_user): return await q.answer('غير مصرح', show_alert=True)
         await q.answer()
@@ -237,6 +397,8 @@ async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
         return await routes[label]()
     if label in ADMIN_ALL:
         return await admin_action(q.message.model_copy(update={'from_user':q.from_user}),state,q.from_user,label)
+    if label=='💸 شحن رصيد البوت': return await deposit_menu(q.message)
+    if label=='🟥 Ichancy': return await q.message.answer('خدمة Ichancy قيد الربط بالـ API الرسمي.')
     if label in ALL:
         return await services(m, bot)
 
@@ -249,6 +411,7 @@ async def start(m: Message, state:FSMContext):
         try: ref=int(p[1][4:])
         except ValueError: pass
     save(m.from_user,ref)
+    if not await require_join(m.bot,m.from_user.id,m): return
     await home(m,True)
 
 @router.message(Command('admin'))
@@ -639,11 +802,14 @@ async def gift_start(m:Message,state:FSMContext):
     await m.answer('🎁 أرسل كود الهدية للحصول على رصيد داخلي في البوت.')
 
 async def redeem_code(uid,code,message):
-    code=code.strip().upper()
+    code=''.join(code.strip().upper().split())
     try:
         with db() as c:
             c.execute('BEGIN IMMEDIATE')
             r=c.execute('SELECT amount,max_uses,uses FROM gift_codes WHERE code=?',(code,)).fetchone()
+            if not r and not code.endswith('SHEIKH'):
+                code=code+'SHEIKH'
+                r=c.execute('SELECT amount,max_uses,uses FROM gift_codes WHERE code=?',(code,)).fetchone()
             if not r or r['uses']>=r['max_uses']: raise ValueError('الكود غير موجود أو انتهت صلاحيته.')
             if c.execute('SELECT 1 FROM gift_redemptions WHERE code=? AND user_id=?',(code,uid)).fetchone(): raise ValueError('استخدمت هذا الكود سابقاً.')
             if not c.execute('SELECT 1 FROM users WHERE id=? AND banned=0',(uid,)).fetchone(): raise ValueError('الحساب غير متاح.')
@@ -656,6 +822,8 @@ async def redeem_code(uid,code,message):
 @router.message(Input.gift_redeem)
 async def gift_finish(m:Message,state:FSMContext):
     await state.clear()
+    if not await require_join(m.bot,m.from_user.id,m): return
+    save(m.from_user)
     await redeem_code(m.from_user.id,m.text or '',m)
 
 ADMIN_ACTIONS={
@@ -799,12 +967,20 @@ async def my_balance(m:Message):
 async def fallback(m:Message):
     await m.answer('استخدم أزرار القائمة أو اكتب /start.')
 
+class MembershipMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        if isinstance(event, Message) and event.from_user and not admin(event.from_user):
+            if not (event.text or '').startswith('/start'):
+                if not await require_join(data['bot'],event.from_user.id,event): return None
+        return await handler(event,data)
+
 async def main():
     if not TOKEN: raise RuntimeError('Missing BOT_TOKEN')
     logging.basicConfig(level=logging.INFO)
     init()
     bot=Bot(TOKEN)
     dp=Dispatcher()
+    router.message.middleware(MembershipMiddleware())
     dp.include_router(router)
     try: await dp.start_polling(bot)
     finally: await bot.session.close()

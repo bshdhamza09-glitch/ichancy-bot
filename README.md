@@ -1,34 +1,24 @@
-# Sheikh Bot V7 — local-first
+# Sheikh Bot V9 — manual deposits and channel membership
 
-Telegram aiogram 3 bot, inline keyboard for both public and admin menus. All balances, gift codes, loyalty points and transfers are LOCAL only; **no Ichancy API connection**.
+## New
+- Gift code redemption accepts `CODESHEIKH` or short `CODE` (appends SHEIKH), validates single redemption per user and code use limit.
+- Required channel membership before accessing bot features. Bot must be an **administrator** in @IchancyElSheikh so `getChatMember` can reliably check other users.
+- ShamCash and Syriatel Cash manual deposit flows: show payment details, collect amount and transaction reference, collect ShamCash sender wallet identifier and displayed holder name, send pending request to review chat/admins, approve/reject with protected buttons, notify user.
+- ShamCash QR image included. First sender wallet is recorded as verified **only after admin approval**. The bot **cannot independently read the sender wallet from the QR, screenshot or ShamCash API**. Admin must verify sender identity, currency, amount and receipt against actual incoming funds BEFORE approving.
+- Balances are INTERNAL BOT BALANCES, not Ichancy. Ichancy buttons remain disabled.
 
-## Working features
-- `/start` menu; `/admin` restricted to comma-separated `ADMIN_IDS`; `/balance`; `/cancel`.
-- User listing, search by Telegram ID or username, user profile, ban/unban, local credit/debit, transaction history, points.
-- Loyalty rewards and requests, admin review and refund on rejection.
-- Gift codes and redemption, local balance gifting between registered users, referral link and count.
-- Broadcast, support messages, editable bonus text and configurable informational sections and links, bot pause, simple reports, admin settings.
+## Railway
+1. Upload all contents of this folder to GitHub.
+2. Set BOT_TOKEN, ADMIN_IDS (comma-separated Telegram numeric IDs), DATABASE_PATH=/data/sheikh.db.
+3. Mount a persistent Railway Volume at `/data`; deploy only one polling worker.
+4. Set REQUIRED_CHANNEL=@IchancyElSheikh; add bot as admin of that channel.
+5. Set DEPOSIT_CHAT_ID=-1004294689688 (the provided numeric Telegram chat ID) of the deposit review channel and add the bot as an admin with posting rights. The provided name `AdminIchancyEl-Sheikh` contains a hyphen, which is not a valid public Telegram username; do not assume `@AdminIchancyEl-Sheikh` works. Use numeric ID.
+6. Optional SHAM_ACCOUNT and SYRIATEL_ACCOUNT.
+7. Verify a gift code and both deposit methods using small, non-production test values. Do not approve a deposit without checking the payment provider separately.
 
-## Limits / pending integrations
-- Ichancy login, agent wallet, game balance, deposit/withdraw and external services are **not connected**.
-- Cash payment, cash-back settlement, weekly scheduled referral payout, automatic rewards, real payment codes, jackpot/spins and external transaction burning are **not implemented**. Some admin settings store descriptive/configuration values only.
-- Telegram inline buttons cannot fill the entire width of the chat viewport.
-- SQLite must be stored on a Railway persistent volume (`DATABASE_PATH=/data/sheikh.db`) or replaced with PostgreSQL before production. Two replicas must NOT share this SQLite DB.
-- Admin actions involving money should be confirmed with the owner before use; this is a prototype, not production-grade financial accounting.
-
-## Setup
-1. Python 3.11+, `pip install -r requirements.txt`
-2. Set `BOT_TOKEN`, `ADMIN_IDS=111,222`, `BOT_NAME=Sheikh`, `DATABASE_PATH`.
-3. `python bot.py`
-4. Railway start command: `python bot.py`; use one instance only.
-5. For faster `/start`, welcome GIF is disabled by default. Set `SEND_WELCOME_GIF=1` to enable.
-
-## Security
-Do not put agent passwords or bot tokens in GitHub. Use Railway Variables. Avoid enabling any external money movements until official API documentation, permissions, idempotency and reconciliation are implemented.
-
-## V8 — gift code wizard and account notifications
-- Admin > Codes > Add code: enter English name, automatically append `SHEIKH`, then amount and number of users.
-- Existing gift code redemption remains local to the bot.
-- User receives a private Telegram message for admin balance credit/debit, loyalty points grants, and ban/unban changes.
-- If the user has blocked the bot or never opened it, Telegram cannot deliver the notification; this is logged.
-- No Ichancy API integration or real financial movement.
+## Important limits
+- User-supplied transfer reference and sender wallet details are unverified claims; Telegram Bot API cannot confirm ShamCash/Syriatel transfers.
+- The screenshot QR is for the merchant's destination wallet, **not** proof of the customer's sender wallet. The sender wallet/holder are collected from the user and verified by a human.
+- The `getChatMember` call may fail if the bot is not channel admin. Access is denied in that case.
+- Other pre-existing V8 buttons remain at their previous implementation level. Some are informational/placeholders; they have not all been verified end-to-end.
+- This is a test build; protect credentials and back up the database.
