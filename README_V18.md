@@ -1,0 +1,1 @@
+Sheikh V18: Any user listed in ADMIN_IDS can approve or reject pending deposits, including deposits submitted by their own account. Server-side admin verification remains required; pending-only transactional checks and reviewer audit remain. Warning: approving own deposits creates a financial conflict-of-interest risk. Verify external transfer independently.

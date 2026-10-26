@@ -370,8 +370,6 @@ async def review_deposit(q:CallbackQuery):
         c.execute('BEGIN IMMEDIATE')
         r=c.execute('SELECT * FROM deposits WHERE id=?',(did,)).fetchone()
         if not r or r['status']!='pending': return await q.answer('الطلب تمت معالجته مسبقاً',show_alert=True)
-        if q.from_user.id == r['user_id']:
-            return await q.answer('لا يمكنك الموافقة على طلب الإيداع الخاص بك، حتى لو كنت أدمن. يلزم أدمن آخر.',show_alert=True)
         if action=='approve' and r['method']=='sham':
             bound=c.execute('SELECT account FROM sham_verified WHERE user_id=?',(r['user_id'],)).fetchone()
             if bound and bound['account']!=r['sender_account']: return await q.answer('حساب شام كاش مختلف! رفض التفعيل.',show_alert=True)
