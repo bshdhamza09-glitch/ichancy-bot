@@ -10,7 +10,7 @@ from aiogram import Bot, Dispatcher, F, Router, BaseMiddleware
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove,
+from aiogram.types import (FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, CopyTextButton, ReplyKeyboardRemove,
                            CallbackQuery, Message, BotCommand, BotCommandScopeDefault)
 from dotenv import load_dotenv
 
@@ -60,9 +60,7 @@ USER_ADMIN_ROWS = [
     ['↩️ رجوع للوحة الأدمن'],
 ]
 BONUS_ADMIN_ROWS = [
-    ['📝 تعديل نص البونصات والعروض الحالية'],
-    ['🎁 إضافة أو حذف البونص', '🎁 إدارة الجائزة الحالية'],
-    ['💸 الكاش باك الأسبوعي 10%'],
+    ['📝 تعديل نص العروض والبونصات'],
     ['↩️ رجوع للوحة الأدمن'],
 ]
 LOYALTY_ADMIN_ROWS = [
@@ -155,8 +153,12 @@ def init():
         cols={r[1] for r in c.execute('PRAGMA table_info(users)')}
         if 'bot_balance' not in cols: c.execute('ALTER TABLE users ADD COLUMN bot_balance INTEGER NOT NULL DEFAULT 0')
         c.execute("INSERT OR IGNORE INTO settings VALUES ('enabled','1')")
-        c.execute("INSERT OR IGNORE INTO settings VALUES ('bonuses','لا توجد عروض منشورة حالياً.')")
-        for key,value in [('dollar_rate','0'),('cashback','10'),('weekly_cashback','10'),('referral_reward','0'),('referral_percent','5'),('referral_min_active','3'),('referral_min_transfers','3'),('referral_min_days','3'),('referral_maturity_days','7'),('referral_monthly_cap','500000'),('referral_total_cap','5000000'),('terms','يرجى الالتزام بشروط استخدام البوت.'),('tutorials','لا توجد شروحات منشورة حالياً.'),('vpn_url',''),('apk_url',''),('games_url',''),('direct_url',''),('contact_url',''),('free_spin','غير متاح حالياً.'),('current_prize','لا توجد جائزة حالية.'),('sham_codes',''),('syriatel_codes','')]:
+        c.execute("INSERT OR IGNORE INTO settings VALUES ('bonuses','لا توجد عروض حالية')")
+        # Apply this requested default once, without overwriting later admin edits.
+        if not c.execute("SELECT 1 FROM settings WHERE key='bonuses_v20_applied'").fetchone():
+            c.execute("INSERT INTO settings(key,value) VALUES('bonuses','لا توجد عروض حالية') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+            c.execute("INSERT INTO settings(key,value) VALUES('bonuses_v20_applied','1')")
+        for key,value in [('dollar_rate','14250'),('cashback','10'),('weekly_cashback','10'),('referral_reward','0'),('referral_percent','5'),('referral_min_active','3'),('referral_min_transfers','3'),('referral_min_days','3'),('referral_maturity_days','7'),('referral_monthly_cap','500000'),('referral_total_cap','5000000'),('terms','يرجى الالتزام بشروط استخدام البوت.'),('tutorials','لا توجد شروحات منشورة حالياً.'),('vpn_url',''),('apk_url',''),('games_url',''),('direct_url',''),('contact_url',''),('free_spin','غير متاح حالياً.'),('current_prize','لا توجد جائزة حالية.'),('sham_codes',''),('syriatel_codes','')]:
             c.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',(key,value))
 
         for points,credit in LOYALTY_EXCHANGES_DEFAULT.items():
@@ -252,12 +254,29 @@ async def deposit_menu(m):
 
 async def deposit_instructions(m,method,uid):
     if method=='sham':
-        with db() as c: row=c.execute('SELECT account,holder FROM sham_verified WHERE user_id=?',(uid,)).fetchone()
-        bound=f'{row["account"]} — {row["holder"]}' if row else '— (يُثبَّت بعد مراجعة أول إيداع)'
-        msg=(f'📸 امسح رمز الـ QR للدفع مباشرة عبر ShamCash.\n\nأو أرسل المبلغ إلى الحساب التالي:\n{SHAM_ACCOUNT}\n\nبعد إتمام التحويل، اضغط على الزر أدناه.\n\n⚠️ تأكد من الدفع بالليرة السورية الجديدة (SYP) حصراً.\nلا يتم قبول الدفع بالليرة السورية القديمة.\n\n🔐 حساب شام كاش واحد للإيداع والسحب\nيُثبَّت حساب شام كاش الذي تودع منه بعد تحقق الإدارة من أول إيداع بهوية ظاهرة، ويصبح الحساب الوحيد للإيداع والسحب.\n⚠️ يُمنع إخفاء هوية المرسِل. أي إيداع من حساب آخر أو بهوية مخفية يُحوَّل لمراجعة الإدارة.\n\n🏦 عنوان السحب المعتمد لديك: {bound}')
-        if QR.exists(): await m.answer_photo(FSInputFile(QR),caption='📸 رمز ShamCash للدفع')
-    else: msg=f'📱 سيريتل كاش\nحوّل إلى الرقم: {SYRIATEL_ACCOUNT}\nبالليرة السورية الجديدة فقط. بعد التحويل اضغط الزر لإرسال طلب مراجعة.'
-    await m.answer(msg,reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ أتممت التحويل',callback_data=f'depgo:{method}')]]))
+        rate=setting('dollar_rate')
+        try:
+            rate_number=float(rate)
+            rate_display=f'{rate_number:g}'
+        except (ValueError,TypeError):
+            rate_display='14250'
+        msg=(f'ارسل الى العنوان\n{SHAM_ACCOUNT}\n\n'
+             '♦️ معتصم باسل شرف♦️\n\n'
+             '⚠️ تحذير هام:\n'
+             'لتجنب الحظر ، يرجى التقيّد باستخدام حساب شام كاش واحد فقط لكافة عمليات الشحن والسحب\n\n'
+             'ثم ادخل رقم العملية\n'
+             f'1 ShamCash USD = {rate_display}')
+        if QR.exists():
+            await m.answer_photo(FSInputFile(QR),caption='📸 رمز ShamCash للدفع')
+        kb=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text='📋 نسخ عنوان شام كاش',copy_text=CopyTextButton(text=SHAM_ACCOUNT))],
+            [InlineKeyboardButton(text='✅ أتممت التحويل',callback_data='depgo:sham')]])
+    else:
+        msg=f'📱 سيريتل كاش\nحوّل إلى الرقم: {SYRIATEL_ACCOUNT}\nبالليرة السورية الجديدة فقط. بعد التحويل اضغط الزر لإرسال طلب مراجعة.'
+        kb=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text='📋 نسخ رقم سيريتل كاش',copy_text=CopyTextButton(text=SYRIATEL_ACCOUNT))],
+            [InlineKeyboardButton(text='✅ أتممت التحويل',callback_data='depgo:syriatel')]])
+    await m.answer(msg,reply_markup=kb)
 
 async def send_deposit_to_admins(bot,deposit_id):
     with db() as c:
@@ -742,7 +761,7 @@ async def toggle(m:Message):
     audit(m.from_user.id,'bot_enabled',v)
     await m.answer('البوت مفعّل' if v=='1' else 'البوت موقوف للمستخدمين (الأدمن يعمل).')
 
-@router.message(F.text == '📝 تعديل نص البونصات والعروض الحالية')
+@router.message(F.text.in_({'📝 تعديل نص البونصات والعروض الحالية', '📝 تعديل نص العروض والبونصات'}))
 async def bonus_start(m:Message,state:FSMContext):
     if not admin(m.from_user): return
     await state.set_state(Input.bonus_text)
@@ -750,7 +769,8 @@ async def bonus_start(m:Message,state:FSMContext):
 
 @router.message(Input.bonus_text)
 async def bonus_finish(m:Message,state:FSMContext):
-    if not (m.text or '').strip(): return
+    if not admin(m.from_user): return
+    if not (m.text or '').strip(): return await m.answer('أرسل نصاً غير فارغ.')
     with db() as c: c.execute("UPDATE settings SET value=? WHERE key='bonuses'",(m.text[:3000],))
     audit(m.from_user.id,'bonuses_updated')
     await state.clear()
@@ -1076,7 +1096,7 @@ async def gift_finish(m:Message,state:FSMContext):
     await redeem_code(m.from_user.id,m.text or '',m)
 
 ADMIN_ACTIONS={
- '⚙️ تعديل سعر الدولار':('dollar_rate','أرسل سعر الدولار (رقم موجب).'),
+ '⚙️ تعديل سعر الدولار':('dollar_rate','أرسل سعر 1 ShamCash USD بالليرة السورية الجديدة (رقم موجب). سيظهر السعر في رسالة شام كاش فقط.'),
  '💸 الكاش باك الأسبوعي 10%':('cashback','أرسل نسبة الكاش باك للعرض (0 إلى 100).'),
  '💰 توزيع أرباح الإحالات':('referral_reward','أرسل مكافأة الإحالة الداخلية لكل مستخدم جديد (0 لتعطيلها).'),
  '💳 تعديل أكواد شام كاش':('sham_codes','أرسل نص أكواد شام كاش.'),
@@ -1084,6 +1104,7 @@ ADMIN_ACTIONS={
  '🎁 إدارة الجائزة الحالية':('current_prize','أرسل وصف الجائزة الحالية.'),
  '🎁 إضافة أو حذف البونص':('bonuses','أرسل نص البونصات الجديد.'),
  '📝 تعديل نص البونصات والعروض الحالية':('bonuses','أرسل نص البونصات الجديد.'),
+ '📝 تعديل نص العروض والبونصات':('bonuses','أرسل نص العروض والبونصات الجديد.'),
  '🔥 حرق رقم عملية':('burned_operation','أرسل رقم العملية للتسجيل الإداري فقط (لا يؤثر على Ichancy).'),
 }
 
@@ -1134,7 +1155,7 @@ async def admin_action(message,state,user,action):
     if action=='🎁 تعديل جوائز نقاط الولاء': return await loyalty_prizes_admin(message,state)
     if action=='⚡ تعجيل جوائز نقاط الولاء': return await awards(message,state)
     if action=='📢 الإذاعة': return await broadcast_start(message,state)
-    if action=='📝 تعديل نص البونصات والعروض الحالية': return await bonus_start(message,state)
+    if action in ('📝 تعديل نص البونصات والعروض الحالية', '📝 تعديل نص العروض والبونصات'): return await bonus_start(message,state)
     return await message.answer('هذه العملية غير مدعومة دون تكامل رسمي؛ لم يتم تنفيذ أي تغيير مالي خارجي.')
 
 @router.message(Input.admin_config)
@@ -1145,7 +1166,7 @@ async def admin_config_finish(m:Message,state:FSMContext):
     if key in ('dollar_rate','cashback','referral_reward','referral_percent','referral_min_active','referral_min_transfers','referral_min_days','referral_maturity_days','referral_monthly_cap','referral_total_cap'):
         try:
             v=float(value)
-            if v<0 or (key in ('cashback','referral_percent') and v>100) or (key.startswith('referral_') and key!='referral_percent' and not v.is_integer()): raise ValueError()
+            if v<0 or (key=='dollar_rate' and v<=0) or (key in ('cashback','referral_percent') and v>100) or (key.startswith('referral_') and key!='referral_percent' and not v.is_integer()): raise ValueError()
         except ValueError: return await m.answer('القيمة الرقمية غير صحيحة.')
     with db() as c: c.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,value))
     audit(m.from_user.id,'config_updated',key)
