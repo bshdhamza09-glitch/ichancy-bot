@@ -11,7 +11,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove,
-                           CallbackQuery, Message)
+                           CallbackQuery, Message, BotCommand, BotCommandScopeDefault)
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -222,7 +222,7 @@ async def send_deposit_to_admins(bot,deposit_id):
     kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ تأكيد الإيداع',callback_data=f'dreview:{deposit_id}:approve'),InlineKeyboardButton(text='❌ رفض',callback_data=f'dreview:{deposit_id}:reject')]])
     targets=[]
     if DEPOSIT_CHAT_ID: targets.append(DEPOSIT_CHAT_ID)
-    targets.extend(ADMIN_IDS)
+    targets.extend(aid for aid in ADMIN_IDS if aid != r['user_id'])
     sent=False
     for dest in dict.fromkeys(targets):
         try: await bot.send_message(dest,text,reply_markup=kb);sent=True
@@ -251,6 +251,21 @@ async def begin_deposit(q:CallbackQuery,state:FSMContext):
     await state.set_state(Input.deposit_amount)
     await state.update_data(deposit_method=method)
     await q.message.answer('💰 اكتب المبلغ المحوّل بالليرة السورية الجديدة (رقم صحيح موجب):')
+
+@router.message(Command('cancel'))
+@router.message(F.text.in_({'/الغاء العملية الحالية', '/إلغاء العملية الحالية', 'إلغاء العملية الحالية'}))
+async def quick_cancel(m: Message, state: FSMContext):
+    current = await state.get_state()
+    await state.clear()
+    await m.answer('✅ تم إلغاء العملية الحالية.' if current else 'ℹ️ ما في عملية جارية حالياً.​')
+
+@router.message(Command('balance'))
+@router.message(F.text.in_({'/رصيدي', 'رصيدي'}))
+async def quick_balance(m: Message):
+    save(m.from_user)
+    with db() as c:
+        r = c.execute('SELECT bot_balance,points FROM users WHERE id=?', (m.from_user.id,)).fetchone()
+    await m.answer(f'💰 رصيدك داخل بوت Sheikh: {r["bot_balance"]:,}\n🌟 نقاط الولاء: {r["points"]:,}\n\nرصيد Ichancy منفصل وغير مربوط حالياً.')
 
 @router.message(Input.deposit_amount)
 async def deposit_amount(m:Message,state:FSMContext):
@@ -309,6 +324,8 @@ async def review_deposit(q:CallbackQuery):
         c.execute('BEGIN IMMEDIATE')
         r=c.execute('SELECT * FROM deposits WHERE id=?',(did,)).fetchone()
         if not r or r['status']!='pending': return await q.answer('الطلب تمت معالجته مسبقاً',show_alert=True)
+        if q.from_user.id == r['user_id']:
+            return await q.answer('لا يمكنك الموافقة على طلب الإيداع الخاص بك، حتى لو كنت أدمن. يلزم أدمن آخر.',show_alert=True)
         if action=='approve' and r['method']=='sham':
             bound=c.execute('SELECT account FROM sham_verified WHERE user_id=?',(r['user_id'],)).fetchone()
             if bound and bound['account']!=r['sender_account']: return await q.answer('حساب شام كاش مختلف! رفض التفعيل.',show_alert=True)
@@ -952,17 +969,6 @@ async def admin_search_start(m,state):
     await state.set_state(Input.lookup)
     await m.answer('أرسل Telegram ID أو اسم المستخدم للبحث.')
 
-@router.message(Command('cancel'))
-async def cancel(m:Message,state:FSMContext):
-    await state.clear()
-    await m.answer('تم إلغاء العملية. /start للقائمة الرئيسية أو /admin للإدارة.')
-
-@router.message(Command('balance'))
-async def my_balance(m:Message):
-    save(m.from_user)
-    with db() as c: r=c.execute('SELECT bot_balance,points FROM users WHERE id=?',(m.from_user.id,)).fetchone()
-    await m.answer(f'💰 رصيد البوت الداخلي: {r["bot_balance"]}\n🌟 نقاط الولاء: {r["points"]}\nرصيد Ichancy منفصل.')
-
 @router.message()
 async def fallback(m:Message):
     await m.answer('استخدم أزرار القائمة أو اكتب /start.')
@@ -979,6 +985,11 @@ async def main():
     logging.basicConfig(level=logging.INFO)
     init()
     bot=Bot(TOKEN)
+    await bot.set_my_commands([
+        BotCommand(command='start', description='🏠 القائمة الرئيسية'),
+        BotCommand(command='balance', description='💰 رصيدي في البوت'),
+        BotCommand(command='cancel', description='❌ إلغاء العملية الحالية'),
+    ], scope=BotCommandScopeDefault())
     dp=Dispatcher()
     router.message.middleware(MembershipMiddleware())
     dp.include_router(router)
