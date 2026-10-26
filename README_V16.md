@@ -1,0 +1,1 @@
+Sheikh V16: automatic loyalty redemption: 1 point -> 2 SYP, 6 -> 20, 12 -> 50. Inline buttons, atomic debit/credit to INTERNAL bot balance, audit/ledger. Includes V15 support messages to SUPPORT_CHAT_ID=-1004401691217. No Ichancy integration. Existing admin-created loyalty prizes retain their separate pending-approval mechanism. Test with a staging bot before real use.

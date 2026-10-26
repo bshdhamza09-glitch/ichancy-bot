@@ -21,8 +21,10 @@ ADMIN_IDS = {int(x.strip()) for x in os.getenv('ADMIN_IDS', '').split(',') if x.
 DB = Path(os.getenv('DATABASE_PATH', str(Path(__file__).with_name('sheikh.db'))))
 GIF = Path(__file__).with_name('welcome.gif')
 router = Router()
+LOYALTY_EXCHANGES = {1: (1, 2), 6: (6, 20), 12: (12, 50)}  # points -> local SYP bot credit
 REQUIRED_CHANNEL = os.getenv('REQUIRED_CHANNEL', '@IchancyElSheikh').strip()
 DEPOSIT_CHAT_ID = os.getenv('DEPOSIT_CHAT_ID', '').strip()
+SUPPORT_CHAT_ID = os.getenv('SUPPORT_CHAT_ID', '-1004401691217').strip()
 SHAM_ACCOUNT = os.getenv('SHAM_ACCOUNT', 'bbcbfd15ad74579eb0b8e9baca872e57').strip()
 SYRIATEL_ACCOUNT = os.getenv('SYRIATEL_ACCOUNT', '0933185350').strip()
 QR = Path(__file__).with_name('sham_qr.jpg')
@@ -105,6 +107,7 @@ class Input(StatesGroup):
     broadcast = State()
     bonus_text = State()
     support = State()
+    support_confirm = State()
     balance_change = State()
     points_change = State()
     admin_config = State()
@@ -406,6 +409,8 @@ async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
         if not admin(q.from_user): return await q.answer('غير مصرح',show_alert=True)
         await q.answer()
         return await admin_action(q.message.model_copy(update={'from_user':q.from_user}),state,q.from_user,q.data[3:])
+    if q.data.startswith('loyalty:'):
+        return await loyalty_exchange(q)
     if q.data.startswith('gift:'):
         await q.answer()
         return await redeem_code(q.from_user.id,q.data[5:],q.message)
@@ -487,16 +492,55 @@ async def go_home(m:Message,state:FSMContext):
     await state.clear()
     await home(m)
 
+def loyalty_exchange_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='💎 1 نقطة', callback_data='loyalty:1')],
+        [InlineKeyboardButton(text='💎 6 نقاط', callback_data='loyalty:6')],
+        [InlineKeyboardButton(text='💎 12 نقطة', callback_data='loyalty:12')],
+        [InlineKeyboardButton(text='💝 عودة', callback_data=BUTTON_IDS['🏠 القائمة الرئيسية'])],
+    ])
+
 @router.message(F.text == '🌟 نقاط الولاء')
 async def loyalty(m:Message):
     save(m.from_user)
     with db() as c:
-        u=c.execute('SELECT points FROM users WHERE id=?',(m.from_user.id,)).fetchone()
-        rewards=c.execute('SELECT id,title,cost FROM rewards WHERE active=1 ORDER BY cost,id').fetchall()
-        claims=c.execute('SELECT id,status FROM claims WHERE user_id=? ORDER BY id DESC LIMIT 5',(m.from_user.id,)).fetchall()
-    desc='\n'.join(f"#{r['id']} — {r['title']} ({r['cost']} نقطة)" for r in rewards) or 'لا توجد جوائز متاحة حالياً.'
-    history=', '.join(f"#{x['id']} {x['status']}" for x in claims) or 'لا يوجد'
-    await m.answer(f"🌟 رصيد نقاطك: {u['points']}\n\n🎁 الجوائز:\n{desc}\n\n📦 طلباتك: {history}\n\nلاستبدال جائزة اضغط الزر أدناه.",reply_markup=keyboard([['🎁 استبدال نقاط'],['🏠 القائمة الرئيسية']]))
+        u=c.execute('SELECT points,bot_balance FROM users WHERE id=?',(m.from_user.id,)).fetchone()
+    await m.answer(
+        '🎊 قائمة استبدال الجواهر بالرصيد:\n\n'
+        '💎 1 جوهرة   ⏪   💰 2 ليرة سورية رصيد\n'
+        '💎 6 جواهر   ⏪   💰 20 ليرة سورية رصيد\n'
+        '💎 12 جوهرة  ⏪   💰 50 ليرة سورية رصيد\n\n'
+        'اضغط على الخيار المناسب لك من الأسفل للاستبدال الفوري\n\n'
+        f'🌟 نقاطك المتاحة: {u["points"]:,}\n'
+        f'💰 رصيد البوت الداخلي: {u["bot_balance"]:,} ل.س',
+        reply_markup=loyalty_exchange_keyboard())
+
+async def loyalty_exchange(q:CallbackQuery):
+    try:
+        cost=int(q.data.split(':',1)[1])
+    except (ValueError,IndexError):
+        return await q.answer('خيار غير صالح',show_alert=True)
+    if cost not in LOYALTY_EXCHANGES:
+        return await q.answer('خيار غير صالح',show_alert=True)
+    _,credit=LOYALTY_EXCHANGES[cost]
+    # A single IMMEDIATE transaction protects points and credit against concurrent clicks.
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        changed=c.execute('UPDATE users SET points=points-? WHERE id=? AND points>=?',
+                          (cost,q.from_user.id,cost)).rowcount
+        if not changed:
+            c.rollback()
+            return await q.answer('❌ نقاط الولاء غير كافية',show_alert=True)
+        balance=add_local_balance(c,q.from_user.id,credit,0)
+        points=c.execute('SELECT points FROM users WHERE id=?',(q.from_user.id,)).fetchone()['points']
+        c.execute('INSERT INTO audit(actor,action,details) VALUES(?,?,?)',
+                  (q.from_user.id,'loyalty_auto_exchange',f'{cost} points -> {credit} local SYP'))
+    await q.answer('تم الاستبدال بنجاح ✅',show_alert=True)
+    await q.message.answer(
+        f'✅ تم استبدال {cost} نقطة ولاء مقابل {credit} ليرة سورية رصيد داخل البوت.\n'
+        f'🌟 نقاطك المتبقية: {points}\n💰 رصيدك الداخلي: {balance} ل.س\n'
+        'ملاحظة: الرصيد داخلي ولا يتم تحويله إلى Ichancy.',
+        reply_markup=loyalty_exchange_keyboard())
 
 @router.message(F.text == '🎁 استبدال نقاط')
 async def claim_start(m:Message,state:FSMContext):
@@ -692,19 +736,73 @@ async def broadcast_finish(m:Message,state:FSMContext):
     await state.clear()
     await m.answer(f'تم الإرسال إلى {sent} من {len(ids)} مستخدم.',reply_markup=keyboard(ADMIN_ROWS))
 
+def support_keyboard(confirm=False):
+    rows=[]
+    if confirm:
+        rows.append([InlineKeyboardButton(text='☑️ تأكيد إرسال الرسالة',callback_data='support:send')])
+    rows.append([InlineKeyboardButton(text='↪️ رجوع',callback_data='support:back')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 @router.message(F.text == '📝 رسالة للأدمن')
 async def support_start(m:Message,state:FSMContext):
+    await state.clear()
     await state.set_state(Input.support)
-    await m.answer('اكتب رسالتك للأدمن.',reply_markup=back())
+    await m.answer('''🗣️ <b>إرسال رسالة لدعم البوت</b>
+
+يرجى تزويدنا بالمشكلة التي تواجهها أو كتابة رسالة بشكل تفصيلي تشرح سبب التواصل مع الدعم لكي يقوم فريق الدعم بالمساعدة الفورية.
+
+<i>ينتظر البوت رسالة منك •••</i>''',parse_mode='HTML',reply_markup=support_keyboard())
 
 @router.message(Input.support)
-async def support_finish(m:Message,state:FSMContext):
-    if not m.text: return await m.answer('اكتب رسالة نصية.')
-    for aid in ADMIN_IDS:
-        try: await m.bot.send_message(aid,f'📨 رسالة من {m.from_user.id}:\n{m.text[:3500]}')
-        except Exception: logging.exception('Admin message failed')
+async def support_preview(m:Message,state:FSMContext):
+    if not m.text or not m.text.strip():
+        return await m.answer('يرجى كتابة رسالة نصية.',reply_markup=support_keyboard())
+    body=m.text.strip()
+    if len(body)>3500:
+        return await m.answer('الرسالة طويلة. اختصرها إلى 3500 حرف كحد أقصى.')
+    await state.update_data(support_body=body)
+    await state.set_state(Input.support_confirm)
+    from html import escape
+    await m.answer('''🗣️ <b>مراسلة الدعم</b>
+
+يرجى التأكد من الرسالة ومن ثم الضغط على زر إرسال
+
+<b>الرسالة:</b>
+'''+escape(body),parse_mode='HTML',reply_markup=support_keyboard(confirm=True))
+
+@router.message(Input.support_confirm)
+async def support_wait_confirm(m:Message):
+    await m.answer('اضغط على «تأكيد إرسال الرسالة» لإرسالها، أو «رجوع» للإلغاء.',reply_markup=support_keyboard(confirm=True))
+
+@router.callback_query(F.data.startswith('support:'))
+async def support_action(q:CallbackQuery,state:FSMContext,bot:Bot):
+    if q.data=='support:back':
+        await state.clear()
+        await q.answer()
+        return await q.message.answer('🏠 القائمة الرئيسية',reply_markup=keyboard(ROWS))
+    if q.data!='support:send': return await q.answer('زر غير معروف',show_alert=True)
+    if await state.get_state()!=Input.support_confirm.state:
+        return await q.answer('الرسالة غير جاهزة. اكتب رسالة جديدة.',show_alert=True)
+    data=await state.get_data(); body=data.get('support_body','')
+    if not body: return await q.answer('لا توجد رسالة للإرسال.',show_alert=True)
+    if not SUPPORT_CHAT_ID:
+        return await q.answer('مجموعة الدعم غير مهيأة.',show_alert=True)
+    from html import escape
+    sender=q.from_user
+    username='@'+sender.username if sender.username else 'لا يوجد'
+    text=(f'📨 <b>رسالة جديدة لدعم البوت</b>\n'
+          f'👤 الاسم: {escape(sender.full_name)}\n'
+          f'🆔 المعرف: <code>{sender.id}</code>\n'
+          f'🔗 اسم المستخدم: {escape(username)}\n\n'
+          f'💬 <b>الرسالة:</b>\n{escape(body)}')
+    try:
+        await bot.send_message(int(SUPPORT_CHAT_ID),text,parse_mode='HTML')
+    except Exception:
+        logging.exception('Failed to deliver support message to %s',SUPPORT_CHAT_ID)
+        return await q.answer('تعذر الإرسال إلى مجموعة الدعم. حاول لاحقاً.',show_alert=True)
     await state.clear()
-    await m.answer('تم إرسال رسالتك.',reply_markup=keyboard(ROWS))
+    await q.answer('تم الإرسال بنجاح')
+    await q.message.answer('✅ تم إرسال رسالتك إلى فريق الدعم بنجاح. سيتم مراجعتها.',reply_markup=keyboard(ROWS))
 
 def referral_metrics(uid):
     # Only site transactions explicitly verified by admins are counted. Local bot deposits are NOT site play.
