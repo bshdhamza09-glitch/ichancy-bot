@@ -137,6 +137,7 @@ def init():
         CREATE TABLE IF NOT EXISTS gift_codes(code TEXT PRIMARY KEY, amount INTEGER NOT NULL, max_uses INTEGER NOT NULL DEFAULT 1, uses INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS gift_redemptions(code TEXT NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY(code,user_id));
         CREATE TABLE IF NOT EXISTS referrals_paid(user_id INTEGER PRIMARY KEY, paid_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS referral_notifications(referred_id INTEGER PRIMARY KEY, referrer_id INTEGER NOT NULL, notified_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS referral_finance(id INTEGER PRIMARY KEY AUTOINCREMENT, referred_id INTEGER NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('deposit','withdraw')), amount INTEGER NOT NULL CHECK(amount>0), activity_day TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'admin_verified', recorded_by INTEGER NOT NULL, created TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS referral_commissions(id INTEGER PRIMARY KEY AUTOINCREMENT, referrer_id INTEGER NOT NULL, referred_id INTEGER NOT NULL, amount INTEGER NOT NULL CHECK(amount>0), status TEXT NOT NULL DEFAULT 'pending', created TEXT DEFAULT CURRENT_TIMESTAMP, paid_at TEXT);
         CREATE TABLE IF NOT EXISTS deposits(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, method TEXT NOT NULL, amount INTEGER NOT NULL, operation_id TEXT NOT NULL, sender_account TEXT, sender_name TEXT, status TEXT NOT NULL DEFAULT 'pending', requested_at TEXT DEFAULT CURRENT_TIMESTAMP, reviewed_by INTEGER, reviewed_at TEXT, UNIQUE(method,operation_id));
@@ -163,8 +164,33 @@ def audit(actor, action, details=''):
 
 def save(u, ref=None):
     with db() as c:
-        c.execute('INSERT OR IGNORE INTO users(id,username,first_name,referrer) VALUES(?,?,?,?)', (u.id,u.username,u.first_name,ref if ref != u.id else None))
+        valid_ref=ref if ref and ref != u.id and c.execute('SELECT 1 FROM users WHERE id=?',(ref,)).fetchone() else None
+        c.execute('INSERT OR IGNORE INTO users(id,username,first_name,referrer) VALUES(?,?,?,?)', (u.id,u.username,u.first_name,valid_ref))
         c.execute('UPDATE users SET username=?,first_name=? WHERE id=?',(u.username,u.first_name,u.id))
+
+async def notify_referrer_if_new(bot, referred_id):
+    """Send once only after the referred user passes required channel membership.
+    On Telegram send failure do not mark delivered, allowing a later retry.
+    """
+    with db() as c:
+        row=c.execute('SELECT u.referrer,u.first_name,u.username FROM users u WHERE u.id=?',(referred_id,)).fetchone()
+        if not row or not row['referrer']: return False
+        referrer=row['referrer']
+        if c.execute('SELECT 1 FROM referral_notifications WHERE referred_id=?',(referred_id,)).fetchone(): return False
+        parent=c.execute('SELECT id FROM users WHERE id=?',(referrer,)).fetchone()
+        if not parent: return False
+        name=(row['first_name'] or 'مستخدم جديد').replace('<','').replace('>','')
+        username=f"@{row['username']}" if row['username'] else 'بدون اسم مستخدم'
+        count=c.execute('SELECT COUNT(*) FROM users WHERE referrer=?',(referrer,)).fetchone()[0]
+    message=(f'🎉 انضم شخص جديد عن طريق رابط إحالتك!\n\n👤 الاسم: {name}\n🔖 الحساب: {username}\n🆔 المعرف: {referred_id}\n👥 إجمالي إحالاتك: {count}\n\n⏳ الإحالة قيد التفعيل حسب شروط النظام.')
+    try:
+        await bot.send_message(referrer,message)
+    except Exception:
+        logging.exception('Referral notification failed for %s -> %s',referred_id,referrer)
+        return False
+    with db() as c:
+        c.execute('INSERT OR IGNORE INTO referral_notifications(referred_id,referrer_id) VALUES(?,?)',(referred_id,referrer))
+    return True
 
 def setting(k):
     with db() as c:
@@ -244,6 +270,7 @@ async def verify_join(q:CallbackQuery):
     if await joined(q.bot,q.from_user.id):
         await q.answer('تم التحقق',show_alert=True)
         save(q.from_user)
+        await notify_referrer_if_new(q.bot,q.from_user.id)
         await home(q.message)
     else: await q.answer('ما قدرنا نتحقق من الاشتراك. تأكد إنك مشترك وإن البوت أدمن بالقناة.',show_alert=True)
 
@@ -445,6 +472,7 @@ async def start(m: Message, state:FSMContext):
         except ValueError: pass
     save(m.from_user,ref)
     if not await require_join(m.bot,m.from_user.id,m): return
+    await notify_referrer_if_new(m.bot,m.from_user.id)
     await home(m,True)
 
 @router.message(Command('admin'))
