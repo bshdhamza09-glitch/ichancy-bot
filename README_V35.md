@@ -1,0 +1,1 @@
+V35: HARDLUCK video overlays the center of the wheel and attempts autoplay with sound. If Telegram blocks sound autoplay, it plays muted with an optional unmute button. Video closes automatically when finished. The original prize disclosure remains.
