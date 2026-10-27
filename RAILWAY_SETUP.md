@@ -1,3 +1,1 @@
-Railway: deploy from GitHub. Set BOT_TOKEN, BOT_NAME=Sheikh and ADMIN_IDS=first_id,second_id in Variables. For persistent SQLite mount volume and set DATABASE_PATH=/data/sheikh.db. Do not upload .env. Use /start for user menu, /admin for admin menu.
-
-Deposit review channel: set DEPOSIT_CHAT_ID=-1004294689688 in Railway Variables. Add the bot as channel administrator with permission to post.
+Railway: BOT_TOKEN, ADMIN_IDS, DATABASE_PATH=/data/sheikh.db, MINIAPP_URL=https://YOUR-APP.up.railway.app, DEPOSIT_CHAT_ID=-1004294689688, WITHDRAWAL_CHAT_ID=-1004439550155, SUPPORT_CHAT_ID=-1004401691217. Mount a persistent volume at /data. Enable public domain/HTTPS for the same Railway service on port from PORT. Deploy python bot.py. Bot must be admin in Telegram review groups/channels. Never paste BOT_TOKEN in chat.

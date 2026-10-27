@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,7 +11,7 @@ from aiogram import Bot, Dispatcher, F, Router, BaseMiddleware
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, CopyTextButton, ReplyKeyboardRemove,
+from aiogram.types import (FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, CopyTextButton, WebAppInfo, ReplyKeyboardRemove,
                            CallbackQuery, Message, BotCommand, BotCommandScopeDefault)
 from dotenv import load_dotenv
 
@@ -152,6 +153,9 @@ def init():
         CREATE TABLE IF NOT EXISTS support_messages(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, body TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS support_thread_map(chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY(chat_id,message_id));
         CREATE TABLE IF NOT EXISTS loyalty_exchange_options(points INTEGER PRIMARY KEY, credit INTEGER NOT NULL CHECK(credit>0), active INTEGER NOT NULL DEFAULT 1);
+        CREATE TABLE IF NOT EXISTS wheel_spins(deposit_id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,awarded_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS wheel_plays(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,outcome TEXT NOT NULL,played_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS wheel_bonuses(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,percent INTEGER NOT NULL DEFAULT 5,expires_at INTEGER NOT NULL,used_deposit_id INTEGER UNIQUE);
         
         ''')
         withdrawal_cols={r[1] for r in c.execute('PRAGMA table_info(withdrawals)')}
@@ -255,7 +259,10 @@ async def require_join(bot,uid,message):
     return False
 
 async def deposit_menu(m):
-    await m.answer('💰 اختر طريقة شحن الرصيد الداخلي (مراجعة يدوية):',reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+    with db() as c:
+        active=c.execute('SELECT expires_at FROM wheel_bonuses WHERE user_id=? AND used_deposit_id IS NULL AND expires_at>? ORDER BY expires_at ASC LIMIT 1',(m.chat.id,int(time.time()))).fetchone()
+    bonus_note=(f'\n🎁 لديك بونص إيداع 5% متاح حتى {datetime.fromtimestamp(active["expires_at"],timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}' if active else '')
+    await m.answer('💰 اختر طريقة شحن الرصيد الداخلي (مراجعة يدوية):'+bonus_note,reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='🟢 شام كاش',callback_data='dep:sham')],
         [InlineKeyboardButton(text='📱 سيريتل كاش',callback_data='dep:syriatel')],
         [InlineKeyboardButton(text='↩️ الرئيسية',callback_data=BUTTON_IDS['🏠 القائمة الرئيسية'])]]))
@@ -596,17 +603,24 @@ async def review_deposit(q:CallbackQuery):
         status='approved' if action=='approve' else 'rejected'
         c.execute('UPDATE deposits SET status=?,reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?',(status,q.from_user.id,did))
         if action=='approve':
-            new=add_local_balance(c,r['user_id'],r['amount'],q.from_user.id)
+            # Redeem exactly one unexpired, unused bonus on this approved deposit.
+            bonus_row=c.execute('SELECT id,percent FROM wheel_bonuses WHERE user_id=? AND used_deposit_id IS NULL AND expires_at>? ORDER BY expires_at,id LIMIT 1',(r['user_id'],int(time.time()))).fetchone()
+            bonus_amount=0
+            if bonus_row:
+                bonus_amount=r['amount']*bonus_row['percent']//100
+                c.execute('UPDATE wheel_bonuses SET used_deposit_id=? WHERE id=? AND used_deposit_id IS NULL',(did,bonus_row['id']))
+            new=add_local_balance(c,r['user_id'],r['amount']+bonus_amount,q.from_user.id)
             earned_points = r['amount'] // 200
             if earned_points > 0:
                 award = c.execute('INSERT OR IGNORE INTO loyalty_deposit_awards(deposit_id,user_id,points) VALUES(?,?,?)', (did,r['user_id'],earned_points))
                 if award.rowcount:
                     c.execute('UPDATE users SET points=points+? WHERE id=?', (earned_points,r['user_id']))
+            c.execute('INSERT OR IGNORE INTO wheel_spins(deposit_id,user_id) VALUES(?,?)',(did,r['user_id']))
             if r['method']=='sham': c.execute('INSERT OR IGNORE INTO sham_verified(user_id,account,holder) VALUES(?,?,?)',(r['user_id'],r['sender_account'],r['sender_name']))
     await q.answer('تمت معالجة الطلب')
     try: await q.message.edit_reply_markup(reply_markup=None)
     except Exception: pass
-    try: await q.bot.send_message(r['user_id'],f'{"✅ تمت الموافقة على" if action=="approve" else "❌ تم رفض"} طلب الإيداع #{did}.' + (f'\nرصيدك الداخلي الآن: {new}\n🌟 نقاط الولاء المكتسبة: {earned_points} (نقطة لكل 200 SYP جديدة)' if action=='approve' else ''))
+    try: await q.bot.send_message(r['user_id'],f'{"✅ تمت الموافقة على" if action=="approve" else "❌ تم رفض"} طلب الإيداع #{did}.' + (f'\nرصيدك الداخلي الآن: {new}\n🎁 بونص العجلة: {bonus_amount} SYP\n🌟 نقاط الولاء المكتسبة: {earned_points} (نقطة لكل 200 SYP جديدة)' if action=='approve' else ''))
     except Exception: pass
     await q.message.answer(f'الطلب #{did}: {status} بواسطة {q.from_user.id}.')
 
@@ -1117,6 +1131,10 @@ async def services(m:Message,bot:Bot):
     with db() as c: u=c.execute('SELECT banned FROM users WHERE id=?',(m.from_user.id,)).fetchone()
     if u and u['banned']: return await m.answer('حسابك محظور من استخدام الخدمات.')
     if setting('enabled')!='1' and not admin(m.from_user): return await m.answer('البوت متوقف مؤقتاً.')
+    if m.text=='💵 اللفة المجانية':
+        url=os.getenv('MINIAPP_URL','').strip()
+        if not url: return await m.answer('تطبيق العجلة غير مفعّل بعد. أضف MINIAPP_URL في Railway.')
+        return await m.answer('🎡 عجلة EL SHEIKH\nكل إيداع معتمد يعطيك لفة.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🎡 افتح عجلة الحظ',web_app=WebAppInfo(url=url))]]))
     if m.text=='💸 نظام الإحالات':
         return await referral_screen(m,bot,m.from_user.id)
     if m.text=='🎁 البونصات والعروض الحالية': return await m.answer(setting('bonuses'))
@@ -1479,7 +1497,11 @@ async def main():
     dp=Dispatcher()
     router.message.middleware(MembershipMiddleware())
     dp.include_router(router)
+    from wheel_server import serve
+    runner=await serve()
     try: await dp.start_polling(bot)
-    finally: await bot.session.close()
+    finally:
+        await runner.cleanup()
+        await bot.session.close()
 
 if __name__=='__main__': asyncio.run(main())
