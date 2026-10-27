@@ -103,7 +103,7 @@ async function load(){
   try{
     const d=await api('status');
     available=d.spins;
-    count.textContent='🎟️ لفاتك المتاحة: '+available+' | تقدم الدورة: '+d.progress+'/11';
+  count.textContent='🎟️ لفاتك المتاحة: '+available;
     btn.disabled=!available;
   }catch(e){
     count.textContent='افتح العجلة من داخل بوت تلغرام: '+e.message;
