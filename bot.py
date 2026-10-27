@@ -338,7 +338,58 @@ async def withdrawal_choose(q:CallbackQuery,state:FSMContext):
     await state.update_data(withdrawal_method=method)
     await q.message.answer(f'{title}\n\n💱 العملة: {currency}\n\n{bounds}🏷 رسوم السحب: 10%\n\n💰 رصيدك الحالي: {display_balance}\n\nادخل المبلغ الذي تريد سحبه ⏳'+('\n(المبلغ بالدولار، وسعر الصرف المعتمد: '+str(rate)+' SYP لكل USD)' if method=='sham_usd' else ''))
 
-@router.message(Input.withdrawal_amount)
+@router.message(Command('cancel'))
+@router.message(F.text.in_({'/الغاء العملية الحالية', '/إلغاء العملية الحالية', 'إلغاء العملية الحالية'}))
+async def quick_cancel(m: Message, state: FSMContext):
+    current = await state.get_state()
+    await state.clear()
+    await m.answer('✅ تم إلغاء العملية الحالية.' if current else 'ℹ️ ما في عملية جارية حالياً.​')
+
+@router.message(Command('balance'))
+@router.message(F.text.in_({'/رصيدي', 'رصيدي'}))
+async def quick_balance(m: Message):
+    save(m.from_user)
+    with db() as c:
+        r = c.execute('SELECT bot_balance,points FROM users WHERE id=?', (m.from_user.id,)).fetchone()
+    await m.answer(f'💰 رصيدك داخل بوت Sheikh: {r["bot_balance"]:,}\n🌟 نقاط الولاء: {r["points"]:,}\n\nرصيد Ichancy منفصل وغير مربوط حالياً.')
+
+
+@router.message(CommandStart())
+async def start(m: Message, state:FSMContext):
+    await state.clear()
+    ref=None
+    p=(m.text or '').split(maxsplit=1)
+    if len(p)>1 and p[1].startswith('ref_'):
+        try: ref=int(p[1][4:])
+        except ValueError: pass
+    save(m.from_user,ref)
+    if not await require_join(m.bot,m.from_user.id,m): return
+    await notify_referrer_if_new(m.bot,m.from_user.id)
+    await home(m,True)
+
+@router.message(Command('admin'))
+@router.message(F.text == '👮 لوحة تحكم الإدارة')
+async def panel(m:Message,state:FSMContext):
+    if not admin(m.from_user): return await m.answer('غير مصرح لك بالدخول.')
+    await state.clear()
+    await m.answer('👮 لوحة تحكم الإدارة — Sheikh',reply_markup=keyboard(ADMIN_ROWS))
+
+@router.message(F.text == '🏠 القائمة الرئيسية')
+async def go_home(m:Message,state:FSMContext):
+    await state.clear()
+    await home(m)
+
+def loyalty_options():
+    with db() as c:
+        return c.execute('SELECT points,credit FROM loyalty_exchange_options WHERE active=1 ORDER BY points').fetchall()
+
+def loyalty_exchange_keyboard():
+    rows=[[InlineKeyboardButton(text=f'💎 {r["points"]} نقطة',callback_data=f'loyalty:{r["points"]}')] for r in loyalty_options()]
+    rows.append([InlineKeyboardButton(text='💝 عودة',callback_data=BUTTON_IDS['🏠 القائمة الرئيسية'])])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.message(Input.withdrawal_amount, F.text, ~F.text.startswith("/"))
 async def withdrawal_amount(m:Message,state:FSMContext):
     from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
     data=await state.get_data()
@@ -346,11 +397,13 @@ async def withdrawal_amount(m:Message,state:FSMContext):
     try:
         amount=Decimal((m.text or '').strip().replace(',',''))
         if not amount.is_finite() or amount<=0: raise ValueError()
-        rate=int(float(setting('dollar_rate') or '14250'))
-        if rate<=0: raise ValueError()
-        syp=int((amount*rate if method=='sham_usd' else amount).quantize(Decimal('1'),rounding=ROUND_HALF_UP))
+        rate=Decimal(str(setting('dollar_rate') or '14250').strip().replace(',', ''))
+        if not rate.is_finite() or rate<=0: raise ValueError('invalid exchange rate')
+        syp=int(((amount*rate) if method=='sham_usd' else amount).quantize(Decimal('1'),rounding=ROUND_HALF_UP))
         if syp<=0 or (method!='sham_usd' and amount!=int(amount)): raise ValueError()
-    except (ValueError,InvalidOperation): return await m.answer('❌ اكتب مبلغاً صحيحاً موجباً.')
+    except (ValueError,InvalidOperation,TypeError,ArithmeticError) as exc:
+        logging.warning('Invalid withdrawal input user=%s amount=%r error=%s', m.from_user.id, m.text, exc)
+        return await m.answer('❌ أدخل مبلغاً رقمياً صحيحاً موجباً، مثال: 2502. لإلغاء العملية اكتب /cancel')
     if method=='syriatel' and not (400<=syp<=50000): return await m.answer('❌ الحد الأدنى 400 والحد الأقصى 50000 ليرة جديدة.')
     if syp>balance_of(m.from_user.id): return await m.answer('❌ رصيدك غير كافٍ. لا يمكنك سحب أكثر من رصيدك الداخلي.')
     fee=(syp*10+99)//100
@@ -366,7 +419,7 @@ async def withdrawal_amount(m:Message,state:FSMContext):
     else:
         await m.answer('🏦 أرسل عنوان شام كاش للسحب.\n⚠️ لا يوجد عنوان مرسل معتمد محفوظ بعد؛ ستراجع الإدارة العنوان يدوياً قبل التحويل.')
 
-@router.message(Input.withdrawal_address)
+@router.message(Input.withdrawal_address, F.text, ~F.text.startswith("/"))
 async def withdrawal_address(m:Message,state:FSMContext):
     recipient=(m.text or '').strip()
     data=await state.get_data()
@@ -446,21 +499,6 @@ async def begin_deposit(q:CallbackQuery,state:FSMContext):
     await state.set_state(Input.deposit_amount)
     await state.update_data(deposit_method=method)
     await q.message.answer('💰 اكتب المبلغ المحوّل بالليرة السورية الجديدة (رقم صحيح موجب):')
-
-@router.message(Command('cancel'))
-@router.message(F.text.in_({'/الغاء العملية الحالية', '/إلغاء العملية الحالية', 'إلغاء العملية الحالية'}))
-async def quick_cancel(m: Message, state: FSMContext):
-    current = await state.get_state()
-    await state.clear()
-    await m.answer('✅ تم إلغاء العملية الحالية.' if current else 'ℹ️ ما في عملية جارية حالياً.​')
-
-@router.message(Command('balance'))
-@router.message(F.text.in_({'/رصيدي', 'رصيدي'}))
-async def quick_balance(m: Message):
-    save(m.from_user)
-    with db() as c:
-        r = c.execute('SELECT bot_balance,points FROM users WHERE id=?', (m.from_user.id,)).fetchone()
-    await m.answer(f'💰 رصيدك داخل بوت Sheikh: {r["bot_balance"]:,}\n🌟 نقاط الولاء: {r["points"]:,}\n\nرصيد Ichancy منفصل وغير مربوط حالياً.')
 
 @router.message(Input.deposit_amount)
 async def deposit_amount(m:Message,state:FSMContext):
@@ -620,40 +658,6 @@ async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
     if label=='🟥 Ichancy': return await q.message.answer('خدمة Ichancy قيد الربط بالـ API الرسمي.')
     if label in ALL:
         return await services(m, bot)
-
-@router.message(CommandStart())
-async def start(m: Message, state:FSMContext):
-    await state.clear()
-    ref=None
-    p=(m.text or '').split(maxsplit=1)
-    if len(p)>1 and p[1].startswith('ref_'):
-        try: ref=int(p[1][4:])
-        except ValueError: pass
-    save(m.from_user,ref)
-    if not await require_join(m.bot,m.from_user.id,m): return
-    await notify_referrer_if_new(m.bot,m.from_user.id)
-    await home(m,True)
-
-@router.message(Command('admin'))
-@router.message(F.text == '👮 لوحة تحكم الإدارة')
-async def panel(m:Message,state:FSMContext):
-    if not admin(m.from_user): return await m.answer('غير مصرح لك بالدخول.')
-    await state.clear()
-    await m.answer('👮 لوحة تحكم الإدارة — Sheikh',reply_markup=keyboard(ADMIN_ROWS))
-
-@router.message(F.text == '🏠 القائمة الرئيسية')
-async def go_home(m:Message,state:FSMContext):
-    await state.clear()
-    await home(m)
-
-def loyalty_options():
-    with db() as c:
-        return c.execute('SELECT points,credit FROM loyalty_exchange_options WHERE active=1 ORDER BY points').fetchall()
-
-def loyalty_exchange_keyboard():
-    rows=[[InlineKeyboardButton(text=f'💎 {r["points"]} نقطة',callback_data=f'loyalty:{r["points"]}')] for r in loyalty_options()]
-    rows.append([InlineKeyboardButton(text='💝 عودة',callback_data=BUTTON_IDS['🏠 القائمة الرئيسية'])])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 @router.message(F.text == '🌟 نقاط الولاء')
 async def loyalty(m:Message):
