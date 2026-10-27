@@ -61,9 +61,11 @@ async def spin(request):
         except Exception:
             c.rollback();raise
 
-async def page(request):return web.FileResponse(BASE/'index.html')
-async def video(request):return web.FileResponse(BASE/'hardluck.mp4')
-async def health(request):return web.json_response({'ok': True, 'service': 'sheikh-wheel', 'version': 'V30'})
+async def page(request):
+    return web.Response(body=(BASE/'index.html').read_bytes(),content_type='text/html',charset='utf-8',headers={'Cache-Control':'no-store'})
+async def video(request):
+    return web.Response(body=(BASE/'hardluck.mp4').read_bytes(),content_type='video/mp4')
+async def health(request):return web.json_response({'ok': True, 'service': 'sheikh-wheel', 'version': 'V31'})
 
 def create_app():
     setup(); app=web.Application(client_max_size=8192)

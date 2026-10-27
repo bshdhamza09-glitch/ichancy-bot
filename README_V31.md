@@ -1,0 +1,1 @@
+V31: Fix ERR_INVALID_RESPONSE for /wheel by serving HTML as normal web.Response rather than aiohttp FileResponse. /health version V31. Upload entire extracted project to GitHub, redeploy Railway. Keep PORT and Target Port 8080 and MINIAPP_URL=https://ichancy-bot-production-feb1.up.railway.app/wheel.
