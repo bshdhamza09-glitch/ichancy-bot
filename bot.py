@@ -154,6 +154,10 @@ def init():
         CREATE TABLE IF NOT EXISTS loyalty_exchange_options(points INTEGER PRIMARY KEY, credit INTEGER NOT NULL CHECK(credit>0), active INTEGER NOT NULL DEFAULT 1);
         
         ''')
+        withdrawal_cols={r[1] for r in c.execute('PRAGMA table_info(withdrawals)')}
+        for col in ('balance_before','balance_after'):
+            if col not in withdrawal_cols:
+                c.execute(f'ALTER TABLE withdrawals ADD COLUMN {col} INTEGER')
         cols={r[1] for r in c.execute('PRAGMA table_info(users)')}
         if 'bot_balance' not in cols: c.execute('ALTER TABLE users ADD COLUMN bot_balance INTEGER NOT NULL DEFAULT 0')
         c.execute("INSERT OR IGNORE INTO settings VALUES ('enabled','1')")
@@ -463,9 +467,10 @@ async def withdrawal_address(m:Message,state:FSMContext):
             c.execute('BEGIN IMMEDIATE')
             # Reserve funds atomically to prevent duplicate withdrawal requests.
             c.execute('INSERT OR IGNORE INTO users(id) VALUES(?)',(m.from_user.id,))
+            before=c.execute('SELECT bot_balance FROM users WHERE id=?',(m.from_user.id,)).fetchone()['bot_balance']
             new=add_local_balance(c,m.from_user.id,-data['withdrawal_syp'],m.from_user.id)
-            cur=c.execute('INSERT INTO withdrawals(user_id,method,amount_syp,fee_syp,payout_syp,payout_currency,payout_amount,exchange_rate,recipient) VALUES(?,?,?,?,?,?,?,?,?)',(
-                m.from_user.id,method,data['withdrawal_syp'],data['withdrawal_fee'],data['withdrawal_payout'],'USD' if method=='sham_usd' else 'SYP',data['withdrawal_out'],data['withdrawal_rate'] if method=='sham_usd' else None,recipient))
+            cur=c.execute('INSERT INTO withdrawals(user_id,method,amount_syp,fee_syp,payout_syp,payout_currency,payout_amount,exchange_rate,recipient,balance_before,balance_after) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(
+                m.from_user.id,method,data['withdrawal_syp'],data['withdrawal_fee'],data['withdrawal_payout'],'USD' if method=='sham_usd' else 'SYP',data['withdrawal_out'],data['withdrawal_rate'] if method=='sham_usd' else None,recipient,before,new))
             wid=cur.lastrowid
     except ValueError: return await m.answer('❌ الرصيد غير كافٍ أو تغيّر أثناء الطلب. لم يتم تقديم السحب.')
     await m.answer(f'⏳ تم تسجيل طلب السحب #{wid}، وحجز {data["withdrawal_syp"]:,} ليرة جديدة من رصيدك.\nصافي المستحق: {data["withdrawal_out"]} {"USD" if method=="sham_usd" else "SYP"}\nالرصيد المتبقي: {new:,} SYP\nبانتظار مراجعة الإدارة والتحويل اليدوي.')
@@ -474,7 +479,7 @@ async def withdrawal_address(m:Message,state:FSMContext):
 async def send_withdrawal_admin(bot,wid):
     with db() as c: r=c.execute('SELECT * FROM withdrawals WHERE id=?',(wid,)).fetchone()
     if not r: return
-    msg=f'📤 طلب سحب #{wid}\n🆔 المستخدم: {r["user_id"]}\n💳 الطريقة: {r["method"]}\n💰 المبلغ المحجوز: {r["amount_syp"]:,} SYP جديدة\n🏷 الرسوم: {r["fee_syp"]:,} SYP\n💸 الصافي: {r["payout_amount"]} {r["payout_currency"]}\n🏦 الوجهة: {r["recipient"]}\n⏳ لا توافق إلا بعد إرسال المبلغ فعلياً.'
+    msg=f'📤 طلب سحب #{wid}\n🆔 المستخدم: {r["user_id"]}\n💳 الطريقة: {r["method"]}\n💰 الرصيد قبل الطلب: {r["balance_before"]:,} SYP\n💰 المبلغ المحجوز: {r["amount_syp"]:,} SYP جديدة\n💰 الرصيد بعد الحجز: {r["balance_after"]:,} SYP\n🏷 الرسوم: {r["fee_syp"]:,} SYP\n💸 الصافي: {r["payout_amount"]} {r["payout_currency"]}\n🏦 الوجهة: {r["recipient"]}\n⏳ لا توافق إلا بعد إرسال المبلغ فعلياً.'
     kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ تم التحويل — موافقة',callback_data=f'wreview:{wid}:approve'),InlineKeyboardButton(text='❌ رفض وإعادة الرصيد',callback_data=f'wreview:{wid}:reject')]])
     targets=([WITHDRAWAL_CHAT_ID] if WITHDRAWAL_CHAT_ID else [])+list(ADMIN_IDS)
     sent=False
@@ -1160,7 +1165,7 @@ async def user_callback(q,state):
     if action in ('credit','debit','points'):
         await state.set_state(Input.points_change if action=='points' else Input.balance_change)
         await state.update_data(target_uid=uid,action=action,page=page)
-        await q.message.edit_text(f"{'🌟 تعديل النقاط' if action=='points' else '💰 تعديل رصيد البوت'} للمستخدم {uid}\nأرسل المبلغ كعدد صحيح موجب (وحدة داخلية).",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='↩️ إلغاء',callback_data=f'uc:{uid}:{page}')]]))
+        await q.message.edit_text(f"{'🌟 تعديل النقاط' if action=='points' else '💰 تعديل رصيد البوت'} للمستخدم {uid}\nأرسل المبلغ كعدد صحيح أكبر من صفر، ولا يتجاوز رصيد المستخدم عند الخصم.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='↩️ إلغاء',callback_data=f'uc:{uid}:{page}')]]))
 
 @router.message(Input.balance_change)
 @router.message(Input.points_change)
@@ -1169,7 +1174,7 @@ async def apply_internal_change(m:Message,state:FSMContext):
     data=await state.get_data()
     try:
         amount=int((m.text or '').strip())
-        if not 0<amount<=100000000: raise ValueError()
+        if not 0<amount<=9223372036854775807: raise ValueError()
     except ValueError: return await m.answer('أرسل عدداً صحيحاً موجباً ضمن الحد المسموح.')
     uid,action,page=data['target_uid'],data['action'],data['page']
     with db() as c:
@@ -1178,11 +1183,13 @@ async def apply_internal_change(m:Message,state:FSMContext):
         if not row: return await m.answer('المستخدم غير موجود.')
         if action=='points':
             new=row['points']+amount
+            if new>9223372036854775807: return await m.answer('❌ تجاوز الحد التقني لقاعدة البيانات.')
             c.execute('UPDATE users SET points=? WHERE id=?',(new,uid))
         else:
             delta=amount if action=='credit' else -amount
             new=row['bot_balance']+delta
-            if new<0: return await m.answer('الرصيد غير كافٍ للخصم.')
+            if new<0: return await m.answer(f'❌ رصيد المستخدم {row["bot_balance"]:,} فقط، لا يمكن خصم أكثر منه.')
+            if new>9223372036854775807: return await m.answer('❌ تجاوز الحد التقني لقاعدة البيانات.')
             c.execute('UPDATE users SET bot_balance=? WHERE id=?',(new,uid))
             c.execute('INSERT INTO bot_ledger(user_id,admin_id,delta,balance_after) VALUES(?,?,?,?)',(uid,m.from_user.id,delta,new))
     audit(m.from_user.id,'internal_'+action,f'{uid}:{amount}')
@@ -1198,7 +1205,7 @@ async def apply_internal_change(m:Message,state:FSMContext):
 # All balances in these handlers are LOCAL bot ledger balances; no Ichancy operations.
 def add_local_balance(c,uid,delta,actor):
     row=c.execute('SELECT bot_balance FROM users WHERE id=?',(uid,)).fetchone()
-    if not row or row['bot_balance']+delta<0: raise ValueError('المستخدم غير موجود أو الرصيد غير كافٍ')
+    if not row or not 0 <= row['bot_balance']+delta <= 9223372036854775807: raise ValueError('المستخدم غير موجود أو الرصيد غير كافٍ أو المبلغ كبير جداً')
     new=row['bot_balance']+delta
     c.execute('UPDATE users SET bot_balance=? WHERE id=?',(new,uid))
     c.execute('INSERT INTO bot_ledger(user_id,admin_id,delta,balance_after) VALUES(?,?,?,?)',(uid,actor,delta,new))
@@ -1354,7 +1361,7 @@ async def admin_code_amount(m:Message,state:FSMContext):
     if not admin(m.from_user): return
     try:
         amount=int((m.text or '').strip())
-        if not 0<amount<=100000000: raise ValueError()
+        if not 0<amount<=9223372036854775807: raise ValueError()
     except ValueError:
         return await m.answer('أدخل قيمة صحيحة موجبة.')
     await state.update_data(gift_code_amount=amount)
