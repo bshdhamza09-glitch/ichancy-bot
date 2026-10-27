@@ -392,19 +392,37 @@ def loyalty_exchange_keyboard():
 @router.message(Input.withdrawal_amount, F.text, ~F.text.startswith("/"))
 async def withdrawal_amount(m:Message,state:FSMContext):
     from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-    data=await state.get_data()
-    method=data['withdrawal_method']
+    import unicodedata
+    data = await state.get_data()
+    method = data.get('withdrawal_method')
+    if method not in ('syriatel', 'sham_syp', 'sham_usd'):
+        await state.clear()
+        return await m.answer('انتهت عملية السحب. افتح قائمة السحب واختر الطريقة من جديد.')
+    raw = (m.text or '').strip()
+    # Convert Arabic/Persian digits, accept ordinary positive amounts without extra restrictions.
+    normalized = ''.join(str(unicodedata.decimal(ch)) if ch.isdecimal() else ch for ch in raw)
+    normalized = normalized.replace('٬', '').replace(',', '').replace('٫', '.')
     try:
-        amount=Decimal((m.text or '').strip().replace(',',''))
-        if not amount.is_finite() or amount<=0: raise ValueError()
-        rate=Decimal(str(setting('dollar_rate') or '14250').strip().replace(',', ''))
-        if not rate.is_finite() or rate<=0: raise ValueError('invalid exchange rate')
-        syp=int(((amount*rate) if method=='sham_usd' else amount).quantize(Decimal('1'),rounding=ROUND_HALF_UP))
-        if syp<=0 or (method!='sham_usd' and amount!=int(amount)): raise ValueError()
-    except (ValueError,InvalidOperation,TypeError,ArithmeticError) as exc:
-        logging.warning('Invalid withdrawal input user=%s amount=%r error=%s', m.from_user.id, m.text, exc)
-        return await m.answer('❌ أدخل مبلغاً رقمياً صحيحاً موجباً، مثال: 2502. لإلغاء العملية اكتب /cancel')
-    if method=='syriatel' and not (400<=syp<=50000): return await m.answer('❌ الحد الأدنى 400 والحد الأقصى 50000 ليرة جديدة.')
+        if not normalized or normalized.count('.') > 1 or any(ch not in '0123456789.' for ch in normalized):
+            raise ValueError('not numeric')
+        amount = Decimal(normalized)
+        if not amount.is_finite() or amount <= 0:
+            raise ValueError('invalid amount')
+        rate = Decimal(str(setting('dollar_rate') or '14250').strip().replace(',', ''))
+        if not rate.is_finite() or rate <= 0:
+            return await m.answer('❌ سعر الصرف غير مضبوط. اطلب من الأدمن تصحيحه.')
+        if method == 'sham_usd':
+            syp = int((amount * rate).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+        else:
+            if amount != amount.to_integral_value():
+                return await m.answer('❌ اكتب المبلغ بالليرة بدون كسور، مثل 2000.')
+            syp = int(amount)
+    except (ValueError, InvalidOperation, TypeError, ArithmeticError, OverflowError) as exc:
+        logging.warning('Withdrawal invalid numeric input user=%s text=%r: %s', m.from_user.id, raw, exc)
+        return await m.answer('❌ اكتب مبلغ السحب بالأرقام فقط، مثل 2000.')
+    if syp <= 0:
+        return await m.answer('❌ اكتب مبلغ سحب أكبر من صفر.')
+    if method=='syriatel' and not (400<=syp<=50000): return await m.answer('❌ المبلغ لازم يكون بين 400 و50000 ليرة سورية جديدة.')
     if syp>balance_of(m.from_user.id): return await m.answer('❌ رصيدك غير كافٍ. لا يمكنك سحب أكثر من رصيدك الداخلي.')
     fee=(syp*10+99)//100
     payout=syp-fee

@@ -1,0 +1,1 @@
+V24: Fix numeric withdrawal parsing. Syriatel accepts any whole SYP amount 400–50000 subject to balance; Arabic/Persian digits supported. /cancel, /start, /balance preserved. Verify actual Railway deployment and check logs if failure persists. No Ichancy API.
