@@ -65,7 +65,7 @@ BONUS_ADMIN_ROWS = [
     ['↩️ رجوع للوحة الأدمن'],
 ]
 LOYALTY_ADMIN_ROWS = [
-    ['➕ منح نقاط ولاء'],
+    ['➕ منح نقاط ولاء', '➖ خصم نقاط ولاء'],
     ['🎁 تعديل جوائز نقاط الولاء'],
     ['↩️ رجوع للوحة الأدمن'],
 ]
@@ -619,7 +619,7 @@ async def home(m, welcome=False):
     if welcome and GIF.exists() and os.getenv('SEND_WELCOME_GIF','0')=='1':
         await m.answer('📋 القائمة الرئيسية',reply_markup=keyboard(ROWS))
 
-@router.callback_query(F.data.startswith(('btn_', 'ul:', 'ud:', 'ua:', 'uc:', 'ac:', 'gift:')))
+@router.callback_query(F.data.startswith(('btn_', 'ul:', 'ud:', 'ua:', 'uc:', 'ac:', 'gift:', 'loyalty:')))
 async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
     if not admin(q.from_user) and not await require_join(bot,q.from_user.id,q.message):
         await q.answer()
@@ -663,6 +663,7 @@ async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
         '🎁 استبدال نقاط': lambda: claim_start(m, state),
 
         '➕ منح نقاط ولاء': lambda: add_start(m, state),
+        '➖ خصم نقاط ولاء': lambda: subtract_points_start(m, state),
         '🎁 تعديل جوائز نقاط الولاء': lambda: loyalty_prizes_admin(m, state),
         '⚡ تعجيل جوائز نقاط الولاء': lambda: awards(m, state),
         '👥 المستخدمين': lambda: users(m),
@@ -790,6 +791,33 @@ async def add_finish(m:Message,state:FSMContext):
     await notify_user(m.bot,uid,f'🌟 أضافت الإدارة {pts} نقطة ولاء لحسابك.')
     await state.clear()
     await m.answer(f'تمت إضافة {pts} نقطة للمستخدم {uid}.',reply_markup=keyboard(LOYALTY_ADMIN_ROWS))
+
+@router.message(F.text == '➖ خصم نقاط ولاء')
+async def subtract_points_start(m:Message,state:FSMContext):
+    if not admin(m.from_user): return
+    await state.set_state(Input.points_change)
+    await state.update_data(loyalty_direct_debit=True)
+    await m.answer('➖ خصم نقاط ولاء\nأرسل: Telegram_ID عدد_النقاط\nمثال: 123456789 5\nلن يتم خصم أكثر من رصيد نقاط المستخدم.')
+
+@router.message(Input.points_change, F.text.regexp(r'^\s*\d+\s+\d+\s*$'))
+async def subtract_points_finish(m:Message,state:FSMContext):
+    if not admin(m.from_user): return
+    data=await state.get_data()
+    if not data.get('loyalty_direct_debit'): return
+    uid,pts=map(int,m.text.split())
+    if not 0<pts<=9223372036854775807:
+        return await m.answer('❌ عدد النقاط غير صالح.')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        row=c.execute('SELECT points FROM users WHERE id=?',(uid,)).fetchone()
+        if not row: return await m.answer('❌ المستخدم غير موجود.')
+        if row['points']<pts: return await m.answer(f'❌ نقاط المستخدم {row["points"]} فقط.')
+        new=row['points']-pts
+        c.execute('UPDATE users SET points=? WHERE id=?',(new,uid))
+        c.execute('INSERT INTO audit(actor,action,details) VALUES(?,?,?)',(m.from_user.id,'loyalty_points_deducted',f'{uid}:{pts}'))
+    await state.clear()
+    await notify_user(m.bot,uid,f'➖ خصمت الإدارة {pts} نقطة ولاء.\n🌟 نقاطك الحالية: {new}')
+    await m.answer(f'✅ تم خصم {pts} نقطة من {uid}. المتبقي: {new}',reply_markup=keyboard(LOYALTY_ADMIN_ROWS))
 
 @router.message(F.text == '🎁 تعديل جوائز نقاط الولاء')
 async def loyalty_prizes_admin(m:Message,state:FSMContext):
@@ -1137,7 +1165,8 @@ async def show_user_detail(message, uid, page=0):
          f"🚫 الحالة: {'محظور' if u['banned'] else 'نشط'}\n📅 التسجيل: {u['joined']}\n\nالرصيد هنا داخلي وليس رصيد Ichancy.")
     rows=[
         [InlineKeyboardButton(text='➕ إضافة رصيد',callback_data=f'ua:credit:{uid}:{page}'),InlineKeyboardButton(text='➖ خصم رصيد',callback_data=f'ua:debit:{uid}:{page}')],
-        [InlineKeyboardButton(text='🌟 تعديل النقاط',callback_data=f'ua:points:{uid}:{page}'),InlineKeyboardButton(text='📜 سجل العمليات',callback_data=f'ua:history:{uid}:{page}')],
+        [InlineKeyboardButton(text='➕ إضافة نقاط',callback_data=f'ua:points:{uid}:{page}'),InlineKeyboardButton(text='➖ خصم نقاط',callback_data=f'ua:points_debit:{uid}:{page}')],
+        [InlineKeyboardButton(text='📜 سجل العمليات',callback_data=f'ua:history:{uid}:{page}')],
         [InlineKeyboardButton(text='🔓 فك الحظر' if u['banned'] else '🚫 حظر المستخدم',callback_data=f'ua:ban:{uid}:{page}')],
         [InlineKeyboardButton(text='↩️ قائمة المستخدمين',callback_data=f'ul:{page}')]
     ]
@@ -1162,10 +1191,10 @@ async def user_callback(q,state):
         with db() as c: rows=c.execute('SELECT delta,balance_after,created FROM bot_ledger WHERE user_id=? ORDER BY id DESC LIMIT 12',(uid,)).fetchall()
         lines='\n'.join(f"{r['created']}: {r['delta']:+d} → {r['balance_after']}" for r in rows) or 'لا توجد عمليات'
         return await q.message.edit_text(f'📜 سجل رصيد البوت للمستخدم {uid}\n{lines}',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='↩️ ملف المستخدم',callback_data=f'ud:{uid}:{page}')]]))
-    if action in ('credit','debit','points'):
-        await state.set_state(Input.points_change if action=='points' else Input.balance_change)
+    if action in ('credit','debit','points','points_debit'):
+        await state.set_state(Input.points_change if action in ('points','points_debit') else Input.balance_change)
         await state.update_data(target_uid=uid,action=action,page=page)
-        await q.message.edit_text(f"{'🌟 تعديل النقاط' if action=='points' else '💰 تعديل رصيد البوت'} للمستخدم {uid}\nأرسل المبلغ كعدد صحيح أكبر من صفر، ولا يتجاوز رصيد المستخدم عند الخصم.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='↩️ إلغاء',callback_data=f'uc:{uid}:{page}')]]))
+        await q.message.edit_text(f"{'🌟 تعديل نقاط الولاء' if action in ('points','points_debit') else '💰 تعديل رصيد البوت'} للمستخدم {uid}\nأرسل المبلغ كعدد صحيح أكبر من صفر، ولا يتجاوز رصيد المستخدم عند الخصم.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='↩️ إلغاء',callback_data=f'uc:{uid}:{page}')]]))
 
 @router.message(Input.balance_change)
 @router.message(Input.points_change)
@@ -1181,8 +1210,9 @@ async def apply_internal_change(m:Message,state:FSMContext):
         c.execute('BEGIN IMMEDIATE')
         row=c.execute('SELECT bot_balance,points FROM users WHERE id=?',(uid,)).fetchone()
         if not row: return await m.answer('المستخدم غير موجود.')
-        if action=='points':
-            new=row['points']+amount
+        if action in ('points','points_debit'):
+            new=row['points'] + (amount if action=='points' else -amount)
+            if new<0: return await m.answer(f'❌ المستخدم يملك {row["points"]:,} نقطة فقط، لا يمكن خصم أكثر منها.')
             if new>9223372036854775807: return await m.answer('❌ تجاوز الحد التقني لقاعدة البيانات.')
             c.execute('UPDATE users SET points=? WHERE id=?',(new,uid))
         else:
@@ -1193,8 +1223,8 @@ async def apply_internal_change(m:Message,state:FSMContext):
             c.execute('UPDATE users SET bot_balance=? WHERE id=?',(new,uid))
             c.execute('INSERT INTO bot_ledger(user_id,admin_id,delta,balance_after) VALUES(?,?,?,?)',(uid,m.from_user.id,delta,new))
     audit(m.from_user.id,'internal_'+action,f'{uid}:{amount}')
-    if action=='points':
-        notice=f'🌟 عدّلت الإدارة نقاط ولائك: +{amount} نقطة.\nرصيد النقاط الحالي: {new}'
+    if action in ('points','points_debit'):
+        notice=f'🌟 عدّلت الإدارة نقاط ولائك: {"+" if action=="points" else "-"}{amount} نقطة.\nرصيد النقاط الحالي: {new}'
     else:
         notice=f'💰 عدّلت الإدارة رصيدك الداخلي: {"إضافة" if action=="credit" else "خصم"} {amount}.\nالرصيد الحالي: {new}'
     await notify_user(m.bot,uid,notice)
@@ -1321,6 +1351,7 @@ async def admin_action(message,state,user,action):
         return await message.answer('✅ البوت مفعّل' if v=='1' else '⏸️ البوت متوقف للمستخدمين')
     if action=='🌟 إدارة نقاط الولاء': return await message.answer('🌟 لوحة الولاء',reply_markup=keyboard(LOYALTY_ADMIN_ROWS))
     if action=='➕ منح نقاط ولاء': return await add_start(message,state)
+    if action=='➖ خصم نقاط ولاء': return await subtract_points_start(message,state)
     if action=='🎁 تعديل جوائز نقاط الولاء': return await loyalty_prizes_admin(message,state)
     if action=='⚡ تعجيل جوائز نقاط الولاء': return await awards(message,state)
     if action=='📢 الإذاعة': return await broadcast_start(message,state)
