@@ -24,6 +24,7 @@ router = Router()
 LOYALTY_EXCHANGES_DEFAULT = {1: 2, 6: 20, 12: 50}  # points -> local SYP bot credit
 REQUIRED_CHANNEL = os.getenv('REQUIRED_CHANNEL', '@IchancyElSheikh').strip()
 DEPOSIT_CHAT_ID = os.getenv('DEPOSIT_CHAT_ID', '').strip()
+WITHDRAWAL_CHAT_ID = os.getenv('WITHDRAWAL_CHAT_ID', '-1004439550155').strip()
 SUPPORT_CHAT_ID = os.getenv('SUPPORT_CHAT_ID', '-1004401691217').strip()
 SHAM_ACCOUNT = os.getenv('SHAM_ACCOUNT', 'bbcbfd15ad74579eb0b8e9baca872e57').strip()
 SYRIATEL_ACCOUNT = os.getenv('SYRIATEL_ACCOUNT', '0933185350').strip()
@@ -119,6 +120,8 @@ class Input(StatesGroup):
     deposit_amount = State()
     deposit_reference = State()
     deposit_sender = State()
+    withdrawal_amount = State()
+    withdrawal_address = State()
 
 
 def db():
@@ -145,6 +148,7 @@ def init():
         CREATE TABLE IF NOT EXISTS deposits(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, method TEXT NOT NULL, amount INTEGER NOT NULL, operation_id TEXT NOT NULL, sender_account TEXT, sender_name TEXT, status TEXT NOT NULL DEFAULT 'pending', requested_at TEXT DEFAULT CURRENT_TIMESTAMP, reviewed_by INTEGER, reviewed_at TEXT, UNIQUE(method,operation_id));
         CREATE TABLE IF NOT EXISTS sham_verified(user_id INTEGER PRIMARY KEY, account TEXT NOT NULL, holder TEXT NOT NULL, verified_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS loyalty_deposit_awards(deposit_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, points INTEGER NOT NULL, created TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS withdrawals(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,method TEXT NOT NULL,amount_syp INTEGER NOT NULL,fee_syp INTEGER NOT NULL,payout_syp INTEGER NOT NULL,payout_currency TEXT NOT NULL,payout_amount TEXT NOT NULL,exchange_rate INTEGER,recipient TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',requested_at TEXT DEFAULT CURRENT_TIMESTAMP,reviewed_by INTEGER,reviewed_at TEXT);
         CREATE TABLE IF NOT EXISTS support_messages(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, body TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS support_thread_map(chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY(chat_id,message_id));
         CREATE TABLE IF NOT EXISTS loyalty_exchange_options(points INTEGER PRIMARY KEY, credit INTEGER NOT NULL CHECK(credit>0), active INTEGER NOT NULL DEFAULT 1);
@@ -292,6 +296,132 @@ async def send_deposit_to_admins(bot,deposit_id):
         try: await bot.send_message(dest,text,reply_markup=kb);sent=True
         except Exception: logging.exception('Failed to send deposit to %s',dest)
     return sent
+
+def balance_of(uid):
+    with db() as c:
+        r=c.execute('SELECT bot_balance FROM users WHERE id=?',(uid,)).fetchone()
+    return int(r['bot_balance']) if r else 0
+
+def withdrawal_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='🟥 سيرياتيل كاش',callback_data='wd:syriatel')],
+        [InlineKeyboardButton(text='💠 شام كاش',callback_data='wd:sham_menu')],
+        [InlineKeyboardButton(text='🟢 USDT',callback_data='wd:unavailable')],
+        [InlineKeyboardButton(text='💸 حوالات مالية',callback_data='wd:unavailable')],
+        [InlineKeyboardButton(text='🏠 القائمة الرئيسية',callback_data=BUTTON_IDS['🏠 القائمة الرئيسية'])]])
+
+async def withdrawal_menu(m,uid):
+    await m.answer(f'⬆️ سحب الرصيد\n\n💰 رصيدك الحالي: {balance_of(uid):,} ليرة سورية جديدة\n\nاختر وسيلة السحب:',reply_markup=withdrawal_keyboard())
+
+@router.callback_query(F.data.startswith('wd:'))
+async def withdrawal_choose(q:CallbackQuery,state:FSMContext):
+    if not await require_join(q.bot,q.from_user.id,q.message): return await q.answer()
+    await q.answer()
+    method=q.data[3:]
+    if method=='unavailable': return await q.message.answer('هذه الطريقة غير مفعلة حالياً، ولا يمكن تقديم طلب عبرها.')
+    if method=='sham_menu':
+        return await q.message.answer('💠 شام كاش\nاختر الطريقة المناسبة •••',reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text='💠 شام كاش (SYP)',callback_data='wd:sham_syp')],
+            [InlineKeyboardButton(text='💠 شام كاش (USD)',callback_data='wd:sham_usd')],
+            [InlineKeyboardButton(text='↩️ رجوع',callback_data='wd:menu')]]))
+    if method=='menu': return await withdrawal_menu(q.message,q.from_user.id)
+    if method not in ('syriatel','sham_syp','sham_usd'): return
+    bal=balance_of(q.from_user.id)
+    if bal<=0: return await q.message.answer('❌ رصيدك الحالي صفر، لا يمكنك تقديم طلب سحب.')
+    rate=int(float(setting('dollar_rate') or '14250'))
+    if method=='sham_usd' and rate<=0: return await q.message.answer('سعر الصرف غير متاح. تواصل مع الإدارة.')
+    display_balance=f'${bal/rate:,.2f}' if method=='sham_usd' else f'{bal:,} ليرة سورية جديدة'
+    title={'syriatel':'🟥 سيرياتيل كاش','sham_syp':'💠 شام كاش (SYP)','sham_usd':'💠 شام كاش (USD)'}[method]
+    currency='USD' if method=='sham_usd' else 'SYP'
+    bounds='⬇️ الحد الأدنى للسحب: 400\n⬆️ الحد الأقصى للسحب: 50000\n\n' if method=='syriatel' else ''
+    await state.set_state(Input.withdrawal_amount)
+    await state.update_data(withdrawal_method=method)
+    await q.message.answer(f'{title}\n\n💱 العملة: {currency}\n\n{bounds}🏷 رسوم السحب: 10%\n\n💰 رصيدك الحالي: {display_balance}\n\nادخل المبلغ الذي تريد سحبه ⏳'+('\n(المبلغ بالدولار، وسعر الصرف المعتمد: '+str(rate)+' SYP لكل USD)' if method=='sham_usd' else ''))
+
+@router.message(Input.withdrawal_amount)
+async def withdrawal_amount(m:Message,state:FSMContext):
+    from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+    data=await state.get_data()
+    method=data['withdrawal_method']
+    try:
+        amount=Decimal((m.text or '').strip().replace(',',''))
+        if not amount.is_finite() or amount<=0: raise ValueError()
+        rate=int(float(setting('dollar_rate') or '14250'))
+        if rate<=0: raise ValueError()
+        syp=int((amount*rate if method=='sham_usd' else amount).quantize(Decimal('1'),rounding=ROUND_HALF_UP))
+        if syp<=0 or (method!='sham_usd' and amount!=int(amount)): raise ValueError()
+    except (ValueError,InvalidOperation): return await m.answer('❌ اكتب مبلغاً صحيحاً موجباً.')
+    if method=='syriatel' and not (400<=syp<=50000): return await m.answer('❌ الحد الأدنى 400 والحد الأقصى 50000 ليرة جديدة.')
+    if syp>balance_of(m.from_user.id): return await m.answer('❌ رصيدك غير كافٍ. لا يمكنك سحب أكثر من رصيدك الداخلي.')
+    fee=(syp*10+99)//100
+    payout=syp-fee
+    if payout<=0: return await m.answer('❌ المبلغ أقل من رسوم السحب.')
+    out=f'{Decimal(payout)/Decimal(rate):.2f}' if method=='sham_usd' else str(payout)
+    await state.update_data(withdrawal_syp=syp,withdrawal_fee=fee,withdrawal_payout=payout,withdrawal_out=out,withdrawal_rate=rate)
+    await state.set_state(Input.withdrawal_address)
+    if method=='syriatel': return await m.answer('📱 أرسل رقم السيرياتيل الذي ترغب في استقبال أرباحك عليه:')
+    with db() as c: bound=c.execute('SELECT account FROM sham_verified WHERE user_id=?',(m.from_user.id,)).fetchone()
+    if bound:
+        await m.answer(f'🏦 عنوان شام كاش المعتمد لإيداعاتك السابقة:\n<code>{bound["account"]}</code>\n\nأرسل نفس العنوان لتأكيد طلب السحب. لا يمكن تغييره إلا بعد مراجعة الإدارة.',parse_mode='HTML')
+    else:
+        await m.answer('🏦 أرسل عنوان شام كاش للسحب.\n⚠️ لا يوجد عنوان مرسل معتمد محفوظ بعد؛ ستراجع الإدارة العنوان يدوياً قبل التحويل.')
+
+@router.message(Input.withdrawal_address)
+async def withdrawal_address(m:Message,state:FSMContext):
+    recipient=(m.text or '').strip()
+    data=await state.get_data()
+    method=data['withdrawal_method']
+    if not (4<=len(recipient)<=150) or '\n' in recipient: return await m.answer('أرسل عنواناً أو رقماً صحيحاً في سطر واحد.')
+    if method=='syriatel' and (not recipient.isdigit() or len(recipient)!=10 or not recipient.startswith('09')):
+        return await m.answer('أرسل رقم سيريتل سوري صحيحاً من 10 خانات يبدأ بـ 09.')
+    if method.startswith('sham'):
+        with db() as c: bound=c.execute('SELECT account FROM sham_verified WHERE user_id=?',(m.from_user.id,)).fetchone()
+        if bound and recipient!=bound['account']: return await m.answer('❌ يجب استخدام عنوان شام كاش المعتمد من إيداعك السابق. راجع الإدارة لتغييره.')
+    await state.clear()
+    try:
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            # Reserve funds atomically to prevent duplicate withdrawal requests.
+            c.execute('INSERT OR IGNORE INTO users(id) VALUES(?)',(m.from_user.id,))
+            new=add_local_balance(c,m.from_user.id,-data['withdrawal_syp'],m.from_user.id)
+            cur=c.execute('INSERT INTO withdrawals(user_id,method,amount_syp,fee_syp,payout_syp,payout_currency,payout_amount,exchange_rate,recipient) VALUES(?,?,?,?,?,?,?,?,?)',(
+                m.from_user.id,method,data['withdrawal_syp'],data['withdrawal_fee'],data['withdrawal_payout'],'USD' if method=='sham_usd' else 'SYP',data['withdrawal_out'],data['withdrawal_rate'] if method=='sham_usd' else None,recipient))
+            wid=cur.lastrowid
+    except ValueError: return await m.answer('❌ الرصيد غير كافٍ أو تغيّر أثناء الطلب. لم يتم تقديم السحب.')
+    await m.answer(f'⏳ تم تسجيل طلب السحب #{wid}، وحجز {data["withdrawal_syp"]:,} ليرة جديدة من رصيدك.\nصافي المستحق: {data["withdrawal_out"]} {"USD" if method=="sham_usd" else "SYP"}\nالرصيد المتبقي: {new:,} SYP\nبانتظار مراجعة الإدارة والتحويل اليدوي.')
+    await send_withdrawal_admin(m.bot,wid)
+
+async def send_withdrawal_admin(bot,wid):
+    with db() as c: r=c.execute('SELECT * FROM withdrawals WHERE id=?',(wid,)).fetchone()
+    if not r: return
+    msg=f'📤 طلب سحب #{wid}\n🆔 المستخدم: {r["user_id"]}\n💳 الطريقة: {r["method"]}\n💰 المبلغ المحجوز: {r["amount_syp"]:,} SYP جديدة\n🏷 الرسوم: {r["fee_syp"]:,} SYP\n💸 الصافي: {r["payout_amount"]} {r["payout_currency"]}\n🏦 الوجهة: {r["recipient"]}\n⏳ لا توافق إلا بعد إرسال المبلغ فعلياً.'
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ تم التحويل — موافقة',callback_data=f'wreview:{wid}:approve'),InlineKeyboardButton(text='❌ رفض وإعادة الرصيد',callback_data=f'wreview:{wid}:reject')]])
+    targets=([WITHDRAWAL_CHAT_ID] if WITHDRAWAL_CHAT_ID else [])+list(ADMIN_IDS)
+    sent=False
+    for dest in dict.fromkeys(targets):
+        try: await bot.send_message(dest,msg,reply_markup=kb);sent=True
+        except Exception: logging.exception('Withdrawal notification failed to %s',dest)
+    return sent
+
+@router.callback_query(F.data.startswith('wreview:'))
+async def review_withdrawal(q:CallbackQuery):
+    if not admin(q.from_user): return await q.answer('غير مصرح',show_alert=True)
+    try: _,wid,action=q.data.split(':'); wid=int(wid)
+    except (ValueError,AttributeError): return await q.answer('طلب غير صحيح',show_alert=True)
+    if action not in ('approve','reject'): return await q.answer('إجراء غير صحيح',show_alert=True)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        r=c.execute('SELECT * FROM withdrawals WHERE id=?',(wid,)).fetchone()
+        if not r or r['status']!='pending': return await q.answer('الطلب عولج مسبقاً',show_alert=True)
+        c.execute('UPDATE withdrawals SET status=?,reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?',('approved' if action=='approve' else 'rejected',q.from_user.id,wid))
+        if action=='reject': add_local_balance(c,r['user_id'],r['amount_syp'],q.from_user.id)
+    await q.answer('تمت معالجة الطلب')
+    try: await q.message.edit_reply_markup(reply_markup=None)
+    except Exception: pass
+    note=(f'✅ تمت الموافقة على طلب السحب #{wid}. ستصلك أرباحك بعد قليل.' if action=='approve' else f'❌ تم رفض طلب السحب #{wid} وإعادة كامل المبلغ المحجوز إلى رصيدك الداخلي.')
+    try: await q.bot.send_message(r['user_id'],note)
+    except Exception: logging.exception('Withdrawal notification to user failed')
+    await q.message.answer(f'طلب السحب #{wid}: {action} بواسطة {q.from_user.id}')
 
 @router.callback_query(F.data=='verify_join')
 async def verify_join(q:CallbackQuery):
@@ -486,6 +616,7 @@ async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
         return await admin_action(q.message.model_copy(update={'from_user':q.from_user}),state,q.from_user,label)
     if label=='💸 نظام الإحالات': return await referral_screen(q.message,bot,q.from_user.id)
     if label=='💸 شحن رصيد البوت': return await deposit_menu(q.message)
+    if label=='💰 سحب رصيد البوت': return await withdrawal_menu(q.message,q.from_user.id)
     if label=='🟥 Ichancy': return await q.message.answer('خدمة Ichancy قيد الربط بالـ API الرسمي.')
     if label in ALL:
         return await services(m, bot)
@@ -926,8 +1057,8 @@ async def services(m:Message,bot:Bot):
         return await referral_screen(m,bot,m.from_user.id)
     if m.text=='🎁 البونصات والعروض الحالية': return await m.answer(setting('bonuses'))
     if m.text=='🟥 Ichancy': return await m.answer('خدمات Ichancy الخارجية غير متصلة حالياً؛ بانتظار الربط الرسمي.')
-    if m.text in ('💸 شحن رصيد البوت','💰 سحب رصيد البوت'):
-        return await m.answer('🔒 الخدمة غير مفعلة. لا يتم تنفيذ أي تحويل مالي قبل ربط الـ API الرسمي واختباره.')
+    if m.text=='💸 شحن رصيد البوت': return await deposit_menu(m)
+    if m.text=='💰 سحب رصيد البوت': return await withdrawal_menu(m,m.from_user.id)
     lookup={'💜 الشروط والأحكام':'terms','⚠️ الشروحات':'tutorials','💵 اللفة المجانية':'free_spin','💌 تواصل معنا':'contact_url','↗️ Vpn لتشغيل كامل أقسام الموقع':'vpn_url','↗️ ichancy apk':'apk_url','🎰 ألعاب Ichancy':'games_url','⭐ دخول مباشر للألعاب':'direct_url'}
     if m.text in lookup:
         val=setting(lookup[m.text]); return await m.answer(val or 'لم يضف الأدمن محتوى هذا القسم بعد.',reply_markup=keyboard([['🏠 القائمة الرئيسية']]))

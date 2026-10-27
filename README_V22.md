@@ -1,0 +1,1 @@
+Sheikh V22: withdrawal requests are sent to WITHDRAWAL_CHAT_ID=-1004439550155. Deposit requests remain in DEPOSIT_CHAT_ID. Add the bot to the withdrawal group/channel with permission to post. Admin IDs can approve or reject. Do not change DATABASE_PATH or existing Railway volume.
