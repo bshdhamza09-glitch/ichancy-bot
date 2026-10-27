@@ -328,9 +328,15 @@ async def withdrawal_choose(q:CallbackQuery,state:FSMContext):
     if method not in ('syriatel','sham_syp','sham_usd'): return
     bal=balance_of(q.from_user.id)
     if bal<=0: return await q.message.answer('❌ رصيدك الحالي صفر، لا يمكنك تقديم طلب سحب.')
-    rate=int(float(setting('dollar_rate') or '14250'))
-    if method=='sham_usd' and rate<=0: return await q.message.answer('سعر الصرف غير متاح. تواصل مع الإدارة.')
-    display_balance=f'${bal/rate:,.2f}' if method=='sham_usd' else f'{bal:,} ليرة سورية جديدة'
+    rate = None
+    if method == 'sham_usd':
+        try:
+            from decimal import Decimal
+            rate = Decimal(str(setting('dollar_rate')).strip().replace(',', ''))
+            if not rate.is_finite() or rate <= 0: raise ValueError('invalid rate')
+        except (ValueError, TypeError, ArithmeticError):
+            return await q.message.answer('❌ سعر صرف الدولار غير مضبوط. اطلب من الأدمن تصحيحه.')
+    display_balance=f'${Decimal(bal)/rate:,.2f}' if method=='sham_usd' else f'{bal:,} ليرة سورية جديدة'
     title={'syriatel':'🟥 سيرياتيل كاش','sham_syp':'💠 شام كاش (SYP)','sham_usd':'💠 شام كاش (USD)'}[method]
     currency='USD' if method=='sham_usd' else 'SYP'
     bounds='⬇️ الحد الأدنى للسحب: 400\n⬆️ الحد الأقصى للسحب: 50000\n\n' if method=='syriatel' else ''
@@ -408,10 +414,13 @@ async def withdrawal_amount(m:Message,state:FSMContext):
         amount = Decimal(normalized)
         if not amount.is_finite() or amount <= 0:
             raise ValueError('invalid amount')
-        rate = Decimal(str(setting('dollar_rate') or '14250').strip().replace(',', ''))
-        if not rate.is_finite() or rate <= 0:
-            return await m.answer('❌ سعر الصرف غير مضبوط. اطلب من الأدمن تصحيحه.')
+        rate = None
         if method == 'sham_usd':
+            try:
+                rate = Decimal(str(setting('dollar_rate')).strip().replace(',', ''))
+                if not rate.is_finite() or rate <= 0: raise ValueError('invalid rate')
+            except (ValueError, TypeError, ArithmeticError):
+                return await m.answer('❌ سعر صرف الدولار غير مضبوط. اطلب من الأدمن تصحيحه.')
             syp = int((amount * rate).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
         else:
             if amount != amount.to_integral_value():
@@ -427,7 +436,7 @@ async def withdrawal_amount(m:Message,state:FSMContext):
     fee=(syp*10+99)//100
     payout=syp-fee
     if payout<=0: return await m.answer('❌ المبلغ أقل من رسوم السحب.')
-    out=f'{Decimal(payout)/Decimal(rate):.2f}' if method=='sham_usd' else str(payout)
+    out=f'{Decimal(payout)/rate:.2f}' if method=='sham_usd' else str(payout)
     await state.update_data(withdrawal_syp=syp,withdrawal_fee=fee,withdrawal_payout=payout,withdrawal_out=out,withdrawal_rate=rate)
     await state.set_state(Input.withdrawal_address)
     if method=='syriatel': return await m.answer('📱 أرسل رقم السيرياتيل الذي ترغب في استقبال أرباحك عليه:')

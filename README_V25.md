@@ -1,0 +1,1 @@
+V25: SYP withdrawal paths (Syriatel, ShamCash SYP) no longer read or validate USD exchange rate. USD path alone validates exchange rate. Previous functionality retained. Test in Railway before handling real money.
