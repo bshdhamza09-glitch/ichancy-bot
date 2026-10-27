@@ -1,2 +1,149 @@
-<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no"><title>EL SHEIKH | Spin</title><script src="https://telegram.org/js/telegram-web-app.js"></script><style>*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 50% 65%,#124c74 0%,#071c33 50%,#020811 100%);color:#fff;font-family:Arial,sans-serif;min-height:100dvh;display:flex;flex-direction:column;align-items:center}.head{margin:22px 0 8px;font-size:22px;font-weight:900;letter-spacing:2px}.sub{color:#a4d8f0;font-size:12px;margin-bottom:14px}.stage{position:relative;width:min(92vw,450px);aspect-ratio:1}.wheel{position:absolute;inset:3%;border:9px solid #52b9e8;border-radius:50%;box-shadow:0 0 0 5px #173a56,0 12px 35px #000a;transition:transform 5.5s cubic-bezier(.12,.75,.15,1);overflow:hidden;background:#112843}.wheel canvas{width:100%;height:100%;display:block}.pointer{position:absolute;z-index:4;top:-3px;left:50%;transform:translateX(-50%);font-size:46px;filter:drop-shadow(0 2px 3px #000)}.hub{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:3;background:linear-gradient(#eee,#8e9299);color:#151b28;border:5px solid #5d6673;border-radius:50%;width:93px;height:93px;display:grid;place-items:center;font-size:15px;font-weight:1000;box-shadow:0 3px 14px #000b}.panel{width:min(90vw,420px);margin:22px auto;background:#091b2bcc;border:1px solid #36617b;border-radius:15px;padding:16px;text-align:center}.status{font-size:16px;margin:8px}.muted{color:#aed4e6;font-size:12px;line-height:1.6}.btn{width:100%;border:0;border-radius:12px;padding:15px;background:linear-gradient(120deg,#7bd4f5,#299acb);color:#061726;font-weight:900;font-size:18px;margin-top:13px;cursor:pointer}.btn:disabled{opacity:.45}.result{font-weight:800;color:#b7eaff;min-height:27px;margin-top:12px}video{display:none;max-width:100%;max-height:230px;border-radius:12px;margin:12px auto 0}.foot{margin:0 20px 20px;color:#9ab9c7;text-align:center;font-size:12px;line-height:1.6}</style></head><body><div class="head">✦ EL SHEIKH ✦</div><div class="sub">عجلة الحظ</div><div class="stage"><div class="pointer">🔻</div><div class="wheel" id="wheel"><canvas id="c" width="900" height="900"></canvas></div><div class="hub">EL SHEIKH</div></div><div class="panel"><div class="status" id="count">جارٍ تحميل اللفات...</div><button class="btn" id="spin" disabled>🎡 لف العجلة</button><div class="result" id="result"></div><video id="hard" src="/miniapp/hardluck.mp4" controls playsinline preload="metadata"></video></div><details class="foot"><summary>معلومات الجوائز</summary>الجوائز النقدية المعروضة غير متاحة للفوز. النتيجة: HARDLUCK أو بونص إيداع 5% لمدة 24 ساعة. كل إيداع معتمد يمنح لفة.</details><script>
-const tg=window.Telegram?.WebApp;tg?.ready();tg?.expand();const seg=['HARDLUCK','2000 SYP','HARDLUCK','500 SYP','BONUS 5%','1000 SYP','HARDLUCK','200 SYP','BONUS 5%','HARDLUCK','BONUS 5%'];const cv=document.getElementById('c'),ctx=cv.getContext('2d'),N=seg.length,arc=2*Math.PI/N;for(let i=0;i<N;i++){const a=-Math.PI/2+i*arc;ctx.beginPath();ctx.moveTo(450,450);ctx.arc(450,450,450,a,a+arc);ctx.closePath();ctx.fillStyle=seg[i].includes('HARD')?'#70d8b1':i%2?'#1a304f':'#83cceb';ctx.fill();ctx.save();ctx.translate(450,450);ctx.rotate(a+arc/2);ctx.textAlign='right';ctx.fillStyle=seg[i].includes('HARD')?'#051d27':'#fff';ctx.font='bold 34px Arial';ctx.fillText(seg[i],415,12);ctx.restore()};let rotation=0,available=0;const count=document.getElementById('count'),btn=document.getElementById('spin'),result=document.getElementById('result'),video=document.getElementById('hard');async function api(route){const r=await fetch('/api/'+route,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:tg?.initData||''})});const j=await r.json();if(!r.ok)throw Error(j.error||'خطأ اتصال');return j}async function load(){try{const d=await api('status');available=d.spins;count.textContent='🎟️ لفاتك المتاحة: '+available+' | تقدم الدورة: '+d.progress+'/11';btn.disabled=!available}catch(e){count.textContent='افتح العجلة من داخل بوت تلغرام: '+e.message}}btn.onclick=async()=>{btn.disabled=true;result.textContent='⏳ جارٍ تحديد النتيجة...';video.pause();video.style.display='none';try{const d=await api('spin');const target=d.outcome==='bonus'?4:0;const desired=360-(target+.5)*360/N;const current=((rotation%360)+360)%360;rotation+=360*7+((desired-current+360)%360);document.getElementById('wheel').style.transform='rotate('+rotation+'deg)';setTimeout(async()=>{result.textContent=d.outcome==='bonus'?'🎁 ربحت بونص 5% على الإيداع، صالح لمدة 24 ساعة!':'HARDLUCK — حظ أوفر باللفة القادمة';if(d.outcome!=='bonus'){video.style.display='block';try{await video.play()}catch(e){}}await load()},5600)}catch(e){result.textContent=e.message;await load()}};load();</script></body></html>
+
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>EL SHEIKH | Spin</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(ellipse at 50% 65%,#124c74 0%,#071c33 50%,#020811 100%);color:#fff;font-family:Arial,sans-serif;min-height:100dvh;display:flex;flex-direction:column;align-items:center}
+.head{margin:22px 0 8px;font-size:22px;font-weight:900;letter-spacing:2px}
+.sub{color:#a4d8f0;font-size:12px;margin-bottom:14px}
+.stage{position:relative;width:min(92vw,450px);aspect-ratio:1}
+.wheel{position:absolute;inset:3%;border:9px solid #52b9e8;border-radius:50%;box-shadow:0 0 0 5px #173a56,0 12px 35px #000a;transition:transform 5.5s cubic-bezier(.12,.75,.15,1);overflow:hidden;background:#112843}
+.wheel canvas{width:100%;height:100%;display:block}
+.pointer{position:absolute;z-index:4;top:-3px;left:50%;transform:translateX(-50%);font-size:46px;filter:drop-shadow(0 2px 3px #000)}
+.hub{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);z-index:3;background:linear-gradient(#eee,#8e9299);color:#151b28;border:5px solid #5d6673;border-radius:50%;width:93px;height:93px;display:grid;place-items:center;font-size:15px;font-weight:1000;box-shadow:0 3px 14px #000b}
+.panel{width:min(90vw,420px);margin:22px auto;background:#091b2bcc;border:1px solid #36617b;border-radius:15px;padding:16px;text-align:center}
+.status{font-size:16px;margin:8px}
+.btn{width:100%;border:0;border-radius:12px;padding:15px;background:linear-gradient(120deg,#7bd4f5,#299acb);color:#061726;font-weight:900;font-size:18px;margin-top:13px;cursor:pointer}
+.btn:disabled{opacity:.45}
+.result{font-weight:800;color:#b7eaff;min-height:27px;margin-top:12px}
+video{display:none;max-width:100%;max-height:230px;border-radius:12px;margin:12px auto 0}
+.foot{margin:0 20px 20px;color:#9ab9c7;text-align:center;font-size:12px;line-height:1.6}
+</style>
+</head>
+<body>
+
+<div class="head">✦ EL SHEIKH ✦</div>
+<div class="sub">عجلة الحظ</div>
+
+<div class="stage">
+  <div class="pointer">🔻</div>
+  <div class="wheel" id="wheel">
+    <canvas id="c" width="900" height="900"></canvas>
+  </div>
+  <div class="hub">EL SHEIKH</div>
+</div>
+
+<div class="panel">
+  <div class="status" id="count">جارٍ تحميل اللفات...</div>
+  <button class="btn" id="spin" disabled>🎡 لف العجلة</button>
+  <div class="result" id="result"></div>
+  <video id="hard" src="/miniapp/hardluck.mp4" controls playsinline preload="metadata"></video>
+</div>
+
+
+<script>
+const tg=window.Telegram?.WebApp;
+tg?.ready();
+tg?.expand();
+
+const seg=[
+  'HARDLUCK','2000 SYP','HARDLUCK','500 SYP',
+  'BONUS 5%','1000 SYP','HARDLUCK','200 SYP',
+  'BONUS 5%','HARDLUCK','BONUS 5%'
+];
+
+const cv=document.getElementById('c');
+const ctx=cv.getContext('2d');
+const N=seg.length;
+const arc=2*Math.PI/N;
+
+for(let i=0;i<N;i++){
+  const a=-Math.PI/2+i*arc;
+  ctx.beginPath();
+  ctx.moveTo(450,450);
+  ctx.arc(450,450,450,a,a+arc);
+  ctx.closePath();
+  ctx.fillStyle=seg[i].includes('HARD')?'#70d8b1':i%2?'#1a304f':'#83cceb';
+  ctx.fill();
+
+  ctx.save();
+  ctx.translate(450,450);
+  ctx.rotate(a+arc/2);
+  ctx.textAlign='right';
+  ctx.fillStyle=seg[i].includes('HARD')?'#051d27':'#fff';
+  ctx.font='bold 34px Arial';
+  ctx.fillText(seg[i],415,12);
+  ctx.restore();
+}
+
+let rotation=0,available=0;
+
+const count=document.getElementById('count');
+const btn=document.getElementById('spin');
+const result=document.getElementById('result');
+const video=document.getElementById('hard');
+
+async function api(route){
+  const r=await fetch('/api/'+route,{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({initData:tg?.initData||''})
+  });
+  const j=await r.json();
+  if(!r.ok)throw Error(j.error||'خطأ اتصال');
+  return j;
+}
+
+async function load(){
+  try{
+    const d=await api('status');
+    available=d.spins;
+    count.textContent='🎟️ لفاتك المتاحة: '+available+' | تقدم الدورة: '+d.progress+'/11';
+    btn.disabled=!available;
+  }catch(e){
+    count.textContent='افتح العجلة من داخل بوت تلغرام: '+e.message;
+  }
+}
+
+btn.onclick=async()=>{
+  btn.disabled=true;
+  result.textContent='⏳ جارٍ تحديد النتيجة...';
+  video.pause();
+  video.style.display='none';
+
+  try{
+    const d=await api('spin');
+    const target=d.outcome==='bonus'?4:0;
+    const desired=360-(target+.5)*360/N;
+    const current=((rotation%360)+360)%360;
+
+    rotation+=360*7+((desired-current+360)%360);
+    document.getElementById('wheel').style.transform='rotate('+rotation+'deg)';
+
+    setTimeout(async()=>{
+      result.textContent=d.outcome==='bonus'
+        ?'🎁 ربحت بونص 5% على الإيداع، صالح لمدة 24 ساعة!'
+        :'HARDLUCK — حظ أوفر باللفة القادمة';
+
+      if(d.outcome!=='bonus'){
+        video.style.display='block';
+        try{await video.play()}catch(e){}
+      }
+      await load();
+    },5600);
+
+  }catch(e){
+    result.textContent=e.message;
+    await load();
+  }
+};
+
+load();
+</script>
+</body>
+</html>
