@@ -63,10 +63,11 @@ async def spin(request):
 
 async def page(request):return web.FileResponse(BASE/'index.html')
 async def video(request):return web.FileResponse(BASE/'hardluck.mp4')
+async def health(request):return web.json_response({'ok': True, 'service': 'sheikh-wheel', 'version': 'V30'})
 
 def create_app():
     setup(); app=web.Application(client_max_size=8192)
-    app.router.add_get('/',page);app.router.add_get('/miniapp/hardluck.mp4',video)
+    app.router.add_get('/',page);app.router.add_get('/wheel',page);app.router.add_get('/wheel/',page);app.router.add_get('/health',health);app.router.add_get('/miniapp/hardluck.mp4',video)
     app.router.add_post('/api/status',status);app.router.add_post('/api/spin',spin)
     return app
 

@@ -1,0 +1,1 @@
+V30: Wheel available at / and /wheel; /health returns version. Railway Public Domain Target Port must match PORT (8080). If /health returns 404, Railway is running another service/build or old commit. Keep MINIAPP_URL set to https://your-domain/wheel.
