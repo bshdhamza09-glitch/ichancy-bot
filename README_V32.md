@@ -1,0 +1,1 @@
+V32: Wheel page and video are embedded in wheel_server.py. Upload bot.py and wheel_server.py to GitHub root; the miniapp folder is optional. Verify /health returns V32 then open /wheel. Keep PORT=8080 and MINIAPP_URL ending /wheel.
