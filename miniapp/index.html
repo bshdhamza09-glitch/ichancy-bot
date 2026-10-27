@@ -23,6 +23,13 @@ body{margin:0;background:radial-gradient(ellipse at 50% 65%,#124c74 0%,#071c33 5
 .result{font-weight:800;color:#b7eaff;min-height:27px;margin-top:12px}
 video{display:none;max-width:100%;max-height:230px;border-radius:12px;margin:12px auto 0}
 .foot{margin:0 20px 20px;color:#9ab9c7;text-align:center;font-size:12px;line-height:1.6}
+  .hub {
+  direction: ltr;
+  transform: translate(-50%, -50%) rotate(0deg);
+  text-align: center;
+  white-space: nowrap;
+  font-size: 14px;
+}
 </style>
 </head>
 <body>
@@ -130,10 +137,18 @@ btn.onclick=async()=>{
         ?'🎁 ربحت بونص 5% على الإيداع، صالح لمدة 24 ساعة!'
         :'HARDLUCK — حظ أوفر باللفة القادمة';
 
-      if(d.outcome!=='bonus'){
-        video.style.display='block';
-        try{await video.play()}catch(e){}
-      }
+if(d.outcome!=='bonus'){
+  video.style.display='block';
+  video.muted=false;
+  video.currentTime=0;
+
+  try {
+    await video.play();
+  } catch(e) {
+    result.textContent='HARDLUCK — اضغط تشغيل لمشاهدة الفيديو';
+    video.setAttribute('controls','');
+  }
+}
       await load();
     },5600);
 
