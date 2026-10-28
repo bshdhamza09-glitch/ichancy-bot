@@ -27,6 +27,11 @@ REQUIRED_CHANNEL = os.getenv('REQUIRED_CHANNEL', '@IchancyElSheikh').strip()
 DEPOSIT_CHAT_ID = os.getenv('DEPOSIT_CHAT_ID', '').strip()
 WITHDRAWAL_CHAT_ID = os.getenv('WITHDRAWAL_CHAT_ID', '-1004439550155').strip()
 SUPPORT_CHAT_ID = os.getenv('SUPPORT_CHAT_ID', '-1004401691217').strip()
+# Withdrawal-refund requests are delivered to this channel (override with REFUND_CHAT_ID in Railway).
+REFUND_CHAT_ID = os.getenv('REFUND_CHAT_ID', '-1004294689688').strip()
+REFUND_LABEL = '↩️ استرداد آخر طلب سحب'
+LEGACY_BONUS_LABEL = '🎁 البونصات والعروض الحالية'  # removed from the menu; kept only so old inline buttons still resolve
+NO_EXPIRY_TS = 4102444800  # 2100-01-01: wheel cashback has no 24h expiry, it is single-use
 SHAM_ACCOUNT = os.getenv('SHAM_ACCOUNT', 'bbcbfd15ad74579eb0b8e9baca872e57').strip()
 SYRIATEL_ACCOUNT = os.getenv('SYRIATEL_ACCOUNT', '0933185350').strip()
 QR = Path(__file__).with_name('sham_qr.jpg')
@@ -44,7 +49,7 @@ ROWS = [
     ['↗️ Vpn لتشغيل كامل أقسام الموقع', '↗️ ichancy apk'],
     ['💜 الشروط والأحكام'],
     ['💵 اللفة المجانية'],
-    ['🎁 البونصات والعروض الحالية'],
+    [REFUND_LABEL],
     ['🎰 ألعاب Ichancy', '⭐ دخول مباشر للألعاب'],
     ['🌟 نقاط الولاء'],
 ]
@@ -156,8 +161,11 @@ def init():
         CREATE TABLE IF NOT EXISTS wheel_spins(deposit_id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,awarded_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS wheel_plays(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,outcome TEXT NOT NULL,played_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS wheel_bonuses(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,percent INTEGER NOT NULL DEFAULT 5,expires_at INTEGER NOT NULL,used_deposit_id INTEGER UNIQUE);
+        CREATE TABLE IF NOT EXISTS refund_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,withdrawal_id INTEGER NOT NULL UNIQUE,user_id INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'pending',requested_at TEXT DEFAULT CURRENT_TIMESTAMP,reviewed_by INTEGER,reviewed_at TEXT);
         
         ''')
+        if 'kind' not in {r[1] for r in c.execute('PRAGMA table_info(wheel_bonuses)')}:
+            c.execute("ALTER TABLE wheel_bonuses ADD COLUMN kind TEXT NOT NULL DEFAULT 'bonus'")
         withdrawal_cols={r[1] for r in c.execute('PRAGMA table_info(withdrawals)')}
         for col in ('balance_before','balance_after'):
             if col not in withdrawal_cols:
@@ -222,9 +230,11 @@ def setting(k):
 
 # Inline buttons render inside the chat message for BOTH menus.
 BUTTON_IDS = {label: f'btn_{i}' for i, label in enumerate(dict.fromkeys(
-    [label for group in ROWS + ADMIN_ROWS + USER_ADMIN_ROWS + BONUS_ADMIN_ROWS + LOYALTY_ADMIN_ROWS + SETTINGS_ADMIN_ROWS + REPORT_ADMIN_ROWS + CODE_ADMIN_ROWS + REFERRAL_ADMIN_ROWS for label in group] +
+    [(LEGACY_BONUS_LABEL if label == REFUND_LABEL else label) for group in ROWS + ADMIN_ROWS + USER_ADMIN_ROWS + BONUS_ADMIN_ROWS + LOYALTY_ADMIN_ROWS + SETTINGS_ADMIN_ROWS + REPORT_ADMIN_ROWS + CODE_ADMIN_ROWS + REFERRAL_ADMIN_ROWS for label in group] +
     ['🎁 استبدال نقاط', '➕ منح نقاط ولاء', '🎁 إنشاء جائزة ولاء', '👮 لوحة تحكم الإدارة', '↩️ رجوع للوحة الأدمن']
 ))}
+# Old menus already sent to users still carry the old button id: it must NOT trigger the refund flow.
+BUTTON_IDS[REFUND_LABEL] = 'btn_refund_wd'
 ID_BUTTONS = {v: k for k, v in BUTTON_IDS.items()}
 
 def keyboard(rows):
@@ -260,8 +270,10 @@ async def require_join(bot,uid,message):
 
 async def deposit_menu(m):
     with db() as c:
-        active=c.execute('SELECT expires_at FROM wheel_bonuses WHERE user_id=? AND used_deposit_id IS NULL AND expires_at>? ORDER BY expires_at ASC LIMIT 1',(m.chat.id,int(time.time()))).fetchone()
-    bonus_note=(f'\n🎁 لديك بونص إيداع 5% متاح حتى {datetime.fromtimestamp(active["expires_at"],timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}' if active else '')
+        active=c.execute('SELECT expires_at,kind FROM wheel_bonuses WHERE user_id=? AND used_deposit_id IS NULL AND expires_at>? ORDER BY expires_at ASC LIMIT 1',(m.chat.id,int(time.time()))).fetchone()
+    if not active: bonus_note=''
+    elif active['kind']=='cashback': bonus_note='\n💸 لديك كاش باك 5% على مبلغ إيداعك القادم (يُستخدم لمرة واحدة)'
+    else: bonus_note=f'\n🎁 لديك بونص إيداع 5% متاح حتى {datetime.fromtimestamp(active["expires_at"],timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}'
     await m.answer('💰 اختر طريقة شحن الرصيد الداخلي (مراجعة يدوية):'+bonus_note,reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='🟢 شام كاش',callback_data='dep:sham')],
         [InlineKeyboardButton(text='📱 سيريتل كاش',callback_data='dep:syriatel')],
@@ -515,6 +527,80 @@ async def review_withdrawal(q:CallbackQuery):
     except Exception: logging.exception('Withdrawal notification to user failed')
     await q.message.answer(f'طلب السحب #{wid}: {action} بواسطة {q.from_user.id}')
 
+async def refund_last_withdrawal(msg,bot,user):
+    """User asks to refund their LAST withdrawal request; the request goes to REFUND_CHAT_ID for admin review."""
+    uid=user.id
+    with db() as c:
+        w=c.execute('SELECT * FROM withdrawals WHERE user_id=? ORDER BY id DESC LIMIT 1',(uid,)).fetchone()
+        rr=c.execute('SELECT * FROM refund_requests WHERE withdrawal_id=?',(w['id'],)).fetchone() if w else None
+    if not w: return await msg.answer('ما عندك أي طلب سحب لاسترداده.')
+    wid=w['id']
+    if w['status']=='approved': return await msg.answer(f'طلب السحب #{wid} تمت الموافقة عليه وتحويله، لا يمكن استرداده.')
+    if w['status'] in ('rejected','refunded'): return await msg.answer(f'طلب السحب #{wid} أُعيد مبلغه إلى رصيدك مسبقاً.')
+    if rr:
+        if rr['status']=='rejected': return await msg.answer(f'تم رفض طلب استرداد السحب #{wid} سابقاً.')
+        return await msg.answer(f'طلب استرداد السحب #{wid} قيد المراجعة من الإدارة. لا حاجة لإرساله مرة ثانية.')
+    with db() as c:
+        cur=c.execute('INSERT OR IGNORE INTO refund_requests(withdrawal_id,user_id) VALUES(?,?)',(wid,uid))
+        rid=cur.lastrowid if cur.rowcount else None
+    if not rid: return await msg.answer(f'طلب استرداد السحب #{wid} قيد المراجعة من الإدارة.')
+    uname=f'@{user.username}' if getattr(user,'username',None) else '-'
+    text=(f'↩️ طلب استرداد سحب #{wid}\n🆔 المستخدم: {uid} ({uname})\n💳 الطريقة: {w["method"]}\n'
+          f'💰 المبلغ المحجوز: {w["amount_syp"]:,} SYP\n💸 الصافي: {w["payout_amount"]} {w["payout_currency"]}\n'
+          f'🏦 الوجهة: {w["recipient"]}\n🕒 وقت طلب السحب: {w["requested_at"]}\n'
+          '⚠️ وافق فقط إذا لم يتم تحويل المبلغ فعلياً. الموافقة تُرجع المبلغ كاملاً لرصيد المستخدم وتلغي طلب السحب.')
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ موافقة وإعادة الرصيد',callback_data=f'rrefund:{rid}:approve'),InlineKeyboardButton(text='❌ رفض الاسترداد',callback_data=f'rrefund:{rid}:reject')]])
+    sent=False
+    targets=([REFUND_CHAT_ID] if REFUND_CHAT_ID else [])
+    for dest in dict.fromkeys(targets):
+        try: await bot.send_message(dest,text,reply_markup=kb);sent=True
+        except Exception: logging.exception('Refund request failed to %s',dest)
+    if not sent:  # channel unreachable (e.g. bot not admin there): fall back to admins so the request is not lost
+        for dest in ADMIN_IDS:
+            try: await bot.send_message(dest,text,reply_markup=kb);sent=True
+            except Exception: logging.exception('Refund request failed to admin %s',dest)
+    if not sent:
+        with db() as c: c.execute('DELETE FROM refund_requests WHERE id=?',(rid,))
+        return await msg.answer('❌ تعذّر إرسال طلب الاسترداد حالياً. حاول لاحقاً.')
+    await msg.answer(f'✅ تم إرسال طلب استرداد السحب #{wid} إلى الإدارة للمراجعة. سيصلك إشعار بالنتيجة.')
+
+@router.callback_query(F.data.startswith('rrefund:'))
+async def review_refund(q:CallbackQuery):
+    if not admin(q.from_user): return await q.answer('غير مصرح',show_alert=True)
+    try: _,rid,action=q.data.split(':'); rid=int(rid)
+    except (ValueError,AttributeError): return await q.answer('طلب غير صحيح',show_alert=True)
+    if action not in ('approve','reject'): return await q.answer('إجراء غير صحيح',show_alert=True)
+    outcome=None
+    try:
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            rr=c.execute('SELECT * FROM refund_requests WHERE id=?',(rid,)).fetchone()
+            if not rr or rr['status']!='pending': outcome='done'
+            else:
+                w=c.execute('SELECT * FROM withdrawals WHERE id=?',(rr['withdrawal_id'],)).fetchone()
+                if action=='reject':
+                    c.execute("UPDATE refund_requests SET status='rejected',reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?",(q.from_user.id,rid)); outcome='rejected'
+                elif not w or w['status']!='pending':
+                    c.execute("UPDATE refund_requests SET status='rejected',reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?",(q.from_user.id,rid)); outcome='blocked'
+                else:
+                    c.execute("UPDATE withdrawals SET status='refunded',reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'",(q.from_user.id,w['id']))
+                    add_local_balance(c,w['user_id'],w['amount_syp'],q.from_user.id)
+                    c.execute("UPDATE refund_requests SET status='approved',reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?",(q.from_user.id,rid)); outcome='approved'
+    except Exception:
+        logging.exception('Refund review failed')
+        return await q.answer('تعذّرت معالجة الطلب',show_alert=True)
+    if outcome=='done': return await q.answer('الطلب عولج مسبقاً',show_alert=True)
+    await q.answer('تمت معالجة الطلب')
+    try: await q.message.edit_reply_markup(reply_markup=None)
+    except Exception: pass
+    wid=w['id'] if w else '?'
+    notes={'approved':f'✅ تمت الموافقة على استرداد طلب السحب #{wid} وأُعيد {w["amount_syp"]:,} SYP إلى رصيدك الداخلي.' if w else '',
+           'rejected':f'❌ تم رفض طلب استرداد السحب #{wid}. يبقى طلب السحب قيد المعالجة.',
+           'blocked':f'❌ تعذّر استرداد السحب #{wid} لأنه عولج بالفعل.'}
+    try: await q.bot.send_message(rr['user_id'],notes[outcome])
+    except Exception: logging.exception('Refund notification to user failed')
+    await q.message.answer(f'استرداد السحب #{wid}: {outcome} بواسطة {q.from_user.id}')
+
 @router.callback_query(F.data=='verify_join')
 async def verify_join(q:CallbackQuery):
     if await joined(q.bot,q.from_user.id):
@@ -604,9 +690,10 @@ async def review_deposit(q:CallbackQuery):
         c.execute('UPDATE deposits SET status=?,reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?',(status,q.from_user.id,did))
         if action=='approve':
             # Redeem exactly one unexpired, unused bonus on this approved deposit.
-            bonus_row=c.execute('SELECT id,percent FROM wheel_bonuses WHERE user_id=? AND used_deposit_id IS NULL AND expires_at>? ORDER BY expires_at,id LIMIT 1',(r['user_id'],int(time.time()))).fetchone()
-            bonus_amount=0
+            bonus_row=c.execute('SELECT id,percent,kind FROM wheel_bonuses WHERE user_id=? AND used_deposit_id IS NULL AND expires_at>? ORDER BY expires_at,id LIMIT 1',(r['user_id'],int(time.time()))).fetchone()
+            bonus_amount=0;bonus_label='بونص العجلة'
             if bonus_row:
+                if bonus_row['kind']=='cashback': bonus_label='كاش باك العجلة'
                 bonus_amount=r['amount']*bonus_row['percent']//100
                 c.execute('UPDATE wheel_bonuses SET used_deposit_id=? WHERE id=? AND used_deposit_id IS NULL',(did,bonus_row['id']))
             new=add_local_balance(c,r['user_id'],r['amount']+bonus_amount,q.from_user.id)
@@ -620,7 +707,7 @@ async def review_deposit(q:CallbackQuery):
     await q.answer('تمت معالجة الطلب')
     try: await q.message.edit_reply_markup(reply_markup=None)
     except Exception: pass
-    try: await q.bot.send_message(r['user_id'],f'{"✅ تمت الموافقة على" if action=="approve" else "❌ تم رفض"} طلب الإيداع #{did}.' + (f'\nرصيدك الداخلي الآن: {new}\n🎁 بونص العجلة: {bonus_amount} SYP\n🌟 نقاط الولاء المكتسبة: {earned_points} (نقطة لكل 200 SYP جديدة)' if action=='approve' else ''))
+    try: await q.bot.send_message(r['user_id'],f'{"✅ تمت الموافقة على" if action=="approve" else "❌ تم رفض"} طلب الإيداع #{did}.' + (f'\nرصيدك الداخلي الآن: {new}\n🎁 {bonus_label}: {bonus_amount} SYP\n🌟 نقاط الولاء المكتسبة: {earned_points} (نقطة لكل 200 SYP جديدة)' if action=='approve' else ''))
     except Exception: pass
     await q.message.answer(f'الطلب #{did}: {status} بواسطة {q.from_user.id}.')
 
@@ -670,6 +757,10 @@ async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
         return await q.message.edit_text(title, reply_markup=keyboard(rows))
     if label == '🏠 القائمة الرئيسية':
         return await go_home(m, state)
+    if label == LEGACY_BONUS_LABEL:  # stale menu button: just refresh the menu
+        return await go_home(m, state)
+    if label == REFUND_LABEL:
+        return await refund_last_withdrawal(q.message,bot,q.from_user)
     if label == '👮 لوحة تحكم الإدارة':
         return await panel(m, state)
     routes = {
@@ -1137,7 +1228,7 @@ async def services(m:Message,bot:Bot):
         return await m.answer('🎡 عجلة EL SHEIKH\nكل إيداع معتمد يعطيك لفة.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🎡 افتح عجلة الحظ',web_app=WebAppInfo(url=url))]]))
     if m.text=='💸 نظام الإحالات':
         return await referral_screen(m,bot,m.from_user.id)
-    if m.text=='🎁 البونصات والعروض الحالية': return await m.answer(setting('bonuses'))
+    if m.text==REFUND_LABEL: return await refund_last_withdrawal(m,bot,m.from_user)
     if m.text=='🟥 Ichancy': return await m.answer('خدمات Ichancy الخارجية غير متصلة حالياً؛ بانتظار الربط الرسمي.')
     if m.text=='💸 شحن رصيد البوت': return await deposit_menu(m)
     if m.text=='💰 سحب رصيد البوت': return await withdrawal_menu(m,m.from_user.id)
