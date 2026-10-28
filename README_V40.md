@@ -6,3 +6,9 @@ V40
 - DB: new table refund_requests, new column wheel_bonuses.kind (auto-migrated).
 - Env: REFUND_CHAT_ID (optional). The bot must be a member/admin of that channel.
 V40.1: removed the disclosure note under the wheel; wheel now has a single HARDLUCK slice (7 slices: HARDLUCK, 200, BONUS 5%, 500, CASHBACK 5%, 1000, 2000). Server logic unchanged.
+
+V41
+- Referral screen replaced with the new text (+ referral count, link, next distribution date in Damascus time UTC+3, live countdown). Removed buttons: حالة إحالاتي / تفاصيل إحالاتي / إحصائيات متقدمة.
+- Admin: new button "📤 توزيع الإحالات" (first row of the admin panel and inside the referral admin menu). Shows a preview, then pays 5% (setting referral_percent) of approved deposits made by referred users during the period to referrers with >= 3 active referrals (setting referral_min_active). Each deposit is paid once (table referral_paid_deposits). Next distribution moves forward by 10 days.
+- Settings keys: referral_next_distribution, referral_last_distribution (epoch seconds). Defaults: next = 2026-10-28 19:00 Damascus.
+- Existing button ids are unchanged, new buttons use their own ids.

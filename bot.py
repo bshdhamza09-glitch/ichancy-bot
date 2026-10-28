@@ -4,7 +4,7 @@ import logging
 import os
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F, Router, BaseMiddleware
@@ -31,6 +31,7 @@ SUPPORT_CHAT_ID = os.getenv('SUPPORT_CHAT_ID', '-1004401691217').strip()
 REFUND_CHAT_ID = os.getenv('REFUND_CHAT_ID', '-1004294689688').strip()
 REFUND_LABEL = '↩️ استرداد آخر طلب سحب'
 LEGACY_BONUS_LABEL = '🎁 البونصات والعروض الحالية'  # removed from the menu; kept only so old inline buttons still resolve
+DIST_LABEL = '📤 توزيع الإحالات'  # admin button (first row of the admin panel + referral admin menu)
 NO_EXPIRY_TS = 4102444800  # 2100-01-01: wheel cashback has no 24h expiry, it is single-use
 SHAM_ACCOUNT = os.getenv('SHAM_ACCOUNT', 'bbcbfd15ad74579eb0b8e9baca872e57').strip()
 SYRIATEL_ACCOUNT = os.getenv('SYRIATEL_ACCOUNT', '0933185350').strip()
@@ -54,6 +55,7 @@ ROWS = [
     ['🌟 نقاط الولاء'],
 ]
 ADMIN_ROWS = [
+    [DIST_LABEL],
     ['👥 المستخدمين', '🎁 العروض والبونصات'],
     ['🌟 إدارة نقاط الولاء', '📢 الإذاعة'],
     ['⚙️ إعدادات البوت', '📊 التقارير'],
@@ -87,7 +89,7 @@ CODE_ADMIN_ROWS = [
     ['💳 تعديل أكواد شام كاش', '💳 تعديل أكواد سيريتل كاش'],
     ['↩️ رجوع للوحة الأدمن'],
 ]
-REFERRAL_ADMIN_ROWS = [['⚙️ إعدادات نظام الإحالات'], ['📋 سجل إحالات البوت'], ['↩️ رجوع للوحة الأدمن']]
+REFERRAL_ADMIN_ROWS = [[DIST_LABEL], ['⚙️ إعدادات نظام الإحالات'], ['📋 سجل إحالات البوت'], ['↩️ رجوع للوحة الأدمن']]
 ADMIN_MENUS = {
     '👥 المستخدمين': ('👥 إدارة المستخدمين', USER_ADMIN_ROWS),
     '🎁 العروض والبونصات': ('🎁 إدارة العروض والبونصات', BONUS_ADMIN_ROWS),
@@ -161,6 +163,7 @@ def init():
         CREATE TABLE IF NOT EXISTS wheel_spins(deposit_id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,awarded_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS wheel_plays(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,outcome TEXT NOT NULL,played_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS wheel_bonuses(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,percent INTEGER NOT NULL DEFAULT 5,expires_at INTEGER NOT NULL,used_deposit_id INTEGER UNIQUE);
+        CREATE TABLE IF NOT EXISTS referral_paid_deposits(deposit_id INTEGER PRIMARY KEY, referrer_id INTEGER NOT NULL, amount INTEGER NOT NULL, paid_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS refund_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,withdrawal_id INTEGER NOT NULL UNIQUE,user_id INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'pending',requested_at TEXT DEFAULT CURRENT_TIMESTAMP,reviewed_by INTEGER,reviewed_at TEXT);
         
         ''')
@@ -178,7 +181,7 @@ def init():
         if not c.execute("SELECT 1 FROM settings WHERE key='bonuses_v20_applied'").fetchone():
             c.execute("INSERT INTO settings(key,value) VALUES('bonuses','لا توجد عروض حالية') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
             c.execute("INSERT INTO settings(key,value) VALUES('bonuses_v20_applied','1')")
-        for key,value in [('dollar_rate','14250'),('cashback','10'),('weekly_cashback','10'),('referral_reward','0'),('referral_percent','5'),('referral_min_active','3'),('referral_min_transfers','3'),('referral_min_days','3'),('referral_maturity_days','7'),('referral_monthly_cap','500000'),('referral_total_cap','5000000'),('terms','يرجى الالتزام بشروط استخدام البوت.'),('tutorials','لا توجد شروحات منشورة حالياً.'),('vpn_url',''),('apk_url',''),('games_url',''),('direct_url',''),('contact_url',''),('free_spin','غير متاح حالياً.'),('current_prize','لا توجد جائزة حالية.'),('sham_codes',''),('syriatel_codes','')]:
+        for key,value in [('dollar_rate','14250'),('cashback','10'),('weekly_cashback','10'),('referral_reward','0'),('referral_percent','5'),('referral_next_distribution',str(int(datetime(2026,10,28,19,0,tzinfo=timezone(timedelta(hours=3))).timestamp()))),('referral_last_distribution',str(int(datetime(2026,10,18,19,0,tzinfo=timezone(timedelta(hours=3))).timestamp()))),('referral_min_active','3'),('referral_min_transfers','3'),('referral_min_days','3'),('referral_maturity_days','7'),('referral_monthly_cap','500000'),('referral_total_cap','5000000'),('terms','يرجى الالتزام بشروط استخدام البوت.'),('tutorials','لا توجد شروحات منشورة حالياً.'),('vpn_url',''),('apk_url',''),('games_url',''),('direct_url',''),('contact_url',''),('free_spin','غير متاح حالياً.'),('current_prize','لا توجد جائزة حالية.'),('sham_codes',''),('syriatel_codes','')]:
             c.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',(key,value))
 
         for points,credit in LOYALTY_EXCHANGES_DEFAULT.items():
@@ -230,11 +233,12 @@ def setting(k):
 
 # Inline buttons render inside the chat message for BOTH menus.
 BUTTON_IDS = {label: f'btn_{i}' for i, label in enumerate(dict.fromkeys(
-    [(LEGACY_BONUS_LABEL if label == REFUND_LABEL else label) for group in ROWS + ADMIN_ROWS + USER_ADMIN_ROWS + BONUS_ADMIN_ROWS + LOYALTY_ADMIN_ROWS + SETTINGS_ADMIN_ROWS + REPORT_ADMIN_ROWS + CODE_ADMIN_ROWS + REFERRAL_ADMIN_ROWS for label in group] +
+    [(LEGACY_BONUS_LABEL if label == REFUND_LABEL else label) for group in ROWS + ADMIN_ROWS + USER_ADMIN_ROWS + BONUS_ADMIN_ROWS + LOYALTY_ADMIN_ROWS + SETTINGS_ADMIN_ROWS + REPORT_ADMIN_ROWS + CODE_ADMIN_ROWS + REFERRAL_ADMIN_ROWS for label in group if label != DIST_LABEL] +
     ['🎁 استبدال نقاط', '➕ منح نقاط ولاء', '🎁 إنشاء جائزة ولاء', '👮 لوحة تحكم الإدارة', '↩️ رجوع للوحة الأدمن']
 ))}
 # Old menus already sent to users still carry the old button id: it must NOT trigger the refund flow.
 BUTTON_IDS[REFUND_LABEL] = 'btn_refund_wd'
+BUTTON_IDS[DIST_LABEL] = 'btn_ref_dist'  # own id so older menus keep pointing at the same actions
 ID_BUTTONS = {v: k for k, v in BUTTON_IDS.items()}
 
 def keyboard(rows):
@@ -1182,39 +1186,128 @@ def referral_metrics(uid):
         commissions=c.execute("SELECT amount,status FROM referral_commissions WHERE referrer_id=?",(uid,)).fetchall()
     return summary,commissions
 
+DAMASCUS=timezone(timedelta(hours=3))  # display time for the referral schedule (Syria, UTC+3)
+REFERRAL_PERIOD=10*86400
+
+REFERRAL_TEXT=(
+ 'نظام احالات Ichancy الشيخ الانكليزي\n'
+ 'يقدّم لك فرصة لدخل إضافي كل 10 أيام .\n'
+ 'كن وكيلاً معنا بأبسط طريقة\n'
+ 'إحصل على نسبة ثابتة لكل عمليات الشحن والتعبئة القادمة عن طريق رابط احالتك ضمن البوت \n'
+ '.....\n'
+ '1-عند الدخول الى البوت قم بنسخ رابط الاحالة الخاص بك عن طريق الضغط على خيار رابط الاحالة الخاص بي\n'
+ '2- عندما تقوم بنشر رابط احالتك ويقوم أحد بالتسجيل عن طريقة سنبدأ بحساب نسبة ثابتة لجميع عمليات السحب والتعبئة عن طريقك . \n'
+ '3-يمكن الاطلاع على عدد الاحالات التي قامت بالتسجيل من خلال الرابط الخاص بك عن طريق الضغط على خيار عدد الاحالات الخاصة بك خلال المسابقة الحالية \n'
+ '4- يتم حساب الارباح عند وجود 3 إحالات نشطة او أكثر\n'
+ 'ماذا تنتظر...! \n'
+ 'توزيع النسب كل 10 أيام\n')
+
 def referral_keyboard():
-    labels=[('📋 نسخ رابط الدعوة','ref:copy'),('📤 مشاركة الرابط','ref:share'),('👥 تفاصيل إحالاتي','ref:details'),('💸 حالة إحالاتي','ref:status'),('📊 إحصائيات متقدمة','ref:stats'),('🏠 القائمة الرئيسية','ref:home')]
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=a,callback_data=b) for a,b in labels[i:i+2]] for i in (0,2)]+[[InlineKeyboardButton(text=labels[4][0],callback_data=labels[4][1])],[InlineKeyboardButton(text=labels[5][0],callback_data=labels[5][1])]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='🔗 رابط الإحالة الخاص بي',callback_data='ref:copy'),InlineKeyboardButton(text='📤 مشاركة الرابط',callback_data='ref:share')],
+        [InlineKeyboardButton(text='🏠 القائمة الرئيسية',callback_data='ref:home')]])
+
+def next_distribution_ts():
+    try: return int(setting('referral_next_distribution'))
+    except (TypeError,ValueError): return int(datetime(2026,10,28,19,0,tzinfo=DAMASCUS).timestamp())
+
+def referral_screen_text(uid,link,now=None):
+    now=int(now if now is not None else time.time())
+    with db() as c: n=c.execute('SELECT COUNT(*) FROM users WHERE referrer=?',(uid,)).fetchone()[0]
+    nxt=next_distribution_ts(); left=max(0,nxt-now)
+    d,rem=divmod(left,86400); h,rem=divmod(rem,3600); mi=rem//60
+    when=datetime.fromtimestamp(nxt,DAMASCUS).strftime('%Y-%m-%d %H:%M:%S')
+    return (REFERRAL_TEXT+f'\nعدد الاحالات التابعة لك: {n}\nرابط الإحالة الخاص بك: {link}\n\nالموعد القادم لتوزيع الاحالات: \n{when}\n{d} يوم {h} ساعة {mi} دقيقة')
 
 async def referral_screen(message,bot,uid):
     me=await bot.get_me(); link=f'https://t.me/{me.username}?start=ref_{uid}'
-    refs,com=referral_metrics(uid); active=sum(x['active'] for x in refs); suspicious=sum(x['suspicious'] for x in refs)
-    need=int(setting('referral_min_active') or 3)
-    earned=sum(x['amount'] for x in com); paid=sum(x['amount'] for x in com if x['status']=='paid')
-    body=(f'🥉 <b>نظام الإحالات المتقدم</b> 🥉\n━━━━━━━━━━━━━━━━━━━━━\n\n🔗 <b>رابط الإحالة الخاص بك:</b>\n{link}\n\n━━━━━━━━━━━━━━━━━━━━━\n📊 <b>لوحة التحكم:</b>\n\n👥 إجمالي الإحالات: <b>{len(refs)}</b>\n✅ إحالات نشطة: <b>{active}</b> من <b>{need}</b> مطلوبة للصرف (تنقصك {max(0,need-active)})\n⏳ إحالات قيد التفعيل: <b>{len(refs)-active-suspicious}</b>\n🏅 مستواك: <b>🥉 برونزي</b>\n\n━━━━━━━━━━━━━━━━━━━━━\n💰 <b>العمولات:</b>\n\n📌 تفاصيل نسب ومبالغ العمولة متاحة للإدارة فقط\n\n━━━━━━━━━━━━━━━━━━━━━\n📌 <b>شروط استحقاق العمولة:</b>\n• يلزم {need} إحالات نشطة على الأقل\n• الإحالة تنشط بعد {setting("referral_min_transfers")} تحويلات للموقع خلال {setting("referral_min_days")} أيام مختلفة\n• الإحالة التي تسحب أكثر مما تودع تُعلّم للمراجعة ولا تُحتسب\n\n🛡️ <b>نظام الحماية:</b>\n• فترة نضج {setting("referral_maturity_days")} أيام قبل الصرف\n• الحد الشهري {setting("referral_monthly_cap")} NSP لكل إحالة\n• مراجعة العمليات المشبوهة من الإدارة\n\n━━━━━━━━━━━━━━━━━━━━━\n💡 <b>كيف يعمل النظام:</b>\n1️⃣ شارك رابطك مع أصدقائك\n2️⃣ يسجّلون عبر الرابط\n3️⃣ تتحقق الإدارة من نشاطهم على الموقع\n4️⃣ الإدارة تسجّل وتوزّع العمولات وفق سجلات موثّقة')
-    await message.answer(body,parse_mode='HTML',reply_markup=referral_keyboard())
+    await message.answer(referral_screen_text(uid,link),reply_markup=referral_keyboard())
 
 @router.callback_query(F.data.startswith('ref:'))
 async def referral_click(q:CallbackQuery,bot:Bot,state:FSMContext):
-    if not await require_join(bot,q.from_user.id,q.message): return await q.answer()
-    await q.answer(); action=q.data[4:]; uid=q.from_user.id
+    action=q.data[4:]; uid=q.from_user.id
+    if action not in ('home','copy','share'):  # buttons removed in V41 (old messages may still carry them)
+        return await q.answer('تم تحديث نظام الإحالات، افتحه من جديد من القائمة الرئيسية.',show_alert=True)
+    if not await require_join(bot,uid,q.message): return await q.answer()
+    await q.answer()
     me=await bot.get_me(); link=f'https://t.me/{me.username}?start=ref_{uid}'
     if action=='home': return await home(q.message)
     if action=='copy': return await q.message.answer('📋 رابطك للنسخ:\n'+link)
     if action=='share': return await q.message.answer('📤 شارك الرابط التالي مع أصدقائك:\n'+link)
-    refs,com=referral_metrics(uid)
-    if action=='details':
-        if not refs: return await q.message.answer('📭 لا توجد إحالات بعد.\nشارك رابطك لبدء كسب العمولات!')
-        lines=['👥 تفاصيل إحالاتي']
-        for r in refs[:30]: lines.append(f"• {r['name']} ({r['id']}) — {'🔴 قيد المراجعة' if r['suspicious'] else '🟢 نشطة' if r['active'] else '🟡 قيد التفعيل'}")
-        return await q.message.answer('\n'.join(lines))
-    if action=='status':
-        active=sum(r['active'] for r in refs); need=int(setting('referral_min_active') or 3)
-        return await q.message.answer(f'💸 حالة الإحالات\nالإحالات النشطة: {active}/{need}\nتُدار تفاصيل العمولات من لوحة الإدارة فقط.')
-    if action=='stats':
-        d=sum(r['deposit'] for r in refs); w=sum(r['withdraw'] for r in refs); net=max(0,d-w)
-        e=sum(c['amount'] for c in com); paid=sum(c['amount'] for c in com if c['status']=='paid')
-        return await q.message.answer(f'📊 <b>إحصائيات متقدمة</b>\n━━━━━━━━━━━━━━━━━━━━━\n📈 <b>ملخص مالي (عمليات موقع موثقة إدارياً):</b>\n💸 إجمالي ما أودعه المُحالون للموقع: {d} NSP\n💰 إجمالي ما سحبوه من الموقع: {w} NSP\n📉 الخسارة الصافية الإجمالية: {net} NSP\n📊 متوسط الخسارة لكل إحالة: {net//len(refs) if refs else 0} NSP\n━━━━━━━━━━━━━━━━━━━━━\n💰 <b>ملخص العمولات:</b>\n🔒 تفاصيل العمولات خاصة بالإدارة\n━━━━━━━━━━━━━━━━━━━━━\n👥 <b>حالة الإحالات:</b>\n🟢 نشطة: {sum(r["active"] for r in refs)} | 🟡 قيد التفعيل: {sum(not r["active"] and not r["suspicious"] for r in refs)} | 🔴 موقوفة/مشبوهة: {sum(r["suspicious"] for r in refs)}\n━━━━━━━━━━━━━━━━━━━━━\n📅 حد أقصى شهري: {setting("referral_monthly_cap")} NSP / إحالة\n🏆 حد أقصى كلي: {setting("referral_total_cap")} NSP / إحالة',parse_mode='HTML')
+
+def referral_plan(c,since,until):
+    """Commission plan for approved bot deposits made by referred users in (since, until], never paid before.
+    A referral is 'active' when it has at least one approved deposit in the period; a referrer needs >= referral_min_active
+    active referrals. Commission = referral_percent % of those deposits."""
+    cfg=lambda k,d: (c.execute('SELECT value FROM settings WHERE key=?',(k,)).fetchone() or [d])[0]
+    pct=float(cfg('referral_percent','5') or 5); need=int(float(cfg('referral_min_active','3') or 3))
+    rows=c.execute("""SELECT d.id,d.user_id,d.amount,u.referrer FROM deposits d JOIN users u ON u.id=d.user_id JOIN users r ON r.id=u.referrer
+        WHERE d.status='approved' AND r.banned=0 AND u.referrer<>d.user_id
+        AND CAST(strftime('%s',d.reviewed_at) AS INTEGER)>? AND CAST(strftime('%s',d.reviewed_at) AS INTEGER)<=?
+        AND d.id NOT IN (SELECT deposit_id FROM referral_paid_deposits) ORDER BY d.id""",(since,until)).fetchall()
+    groups={}
+    for r in rows: groups.setdefault(r['referrer'],{}).setdefault(r['user_id'],[]).append((r['id'],r['amount']))
+    eligible=[];skipped=0
+    for ref,users in groups.items():
+        if len(users)<need: skipped+=1; continue
+        per_user={u:sum(a for _,a in lst) for u,lst in users.items()}
+        comm={u:v*int(pct*100)//10000 for u,v in per_user.items()}
+        total=sum(comm.values())
+        if total<=0: skipped+=1; continue
+        eligible.append(dict(referrer=ref,active=len(users),deposits=sum(per_user.values()),commission=total,comm=comm,deposit_ids=[i for lst in users.values() for i,_ in lst]))
+    return dict(pct=pct,need=need,eligible=eligible,skipped=skipped)
+
+def fmt_local(ts): return datetime.fromtimestamp(ts,DAMASCUS).strftime('%Y-%m-%d %H:%M')
+
+async def referral_distribution_preview(message):
+    now=int(time.time()); last=int(setting('referral_last_distribution') or 0)
+    with db() as c: plan=referral_plan(c,last,now)
+    total=sum(e['commission'] for e in plan['eligible'])
+    lines=[f"📤 توزيع أرباح الإحالات\n🗓 الفترة: {fmt_local(last)} ← {fmt_local(now)} (توقيت دمشق)\n📈 النسبة: {plan['pct']:g}% من إيداعات المُحالين المعتمدة\n✅ شرط الاستحقاق: {plan['need']} إحالات نشطة أو أكثر (إحالة نشطة = لها إيداع معتمد ضمن الفترة)\n\n👥 وكلاء مستحقون: {len(plan['eligible'])}\n⛔ غير مستوفين للشرط: {plan['skipped']}\n💰 إجمالي التوزيع: {total:,} SYP\n🗓 الموعد الحالي المسجّل للتوزيع: {fmt_local(next_distribution_ts())}"]
+    for e in sorted(plan['eligible'],key=lambda x:-x['commission'])[:15]: lines.append(f"• {e['referrer']}: {e['commission']:,} SYP ({e['active']} إحالات نشطة)")
+    if not plan['eligible']: return await message.answer('\n'.join(lines)+'\n\nلا يوجد شيء للتوزيع حالياً.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✖️ إغلاق',callback_data='refdist:cancel')]]))
+    await message.answer('\n'.join(lines)+'\n\n⚠️ التأكيد يضيف المبالغ لأرصدة الوكلاء فوراً ولا يمكن التراجع.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ تأكيد التوزيع',callback_data=f'refdist:confirm:{last}'),InlineKeyboardButton(text='✖️ إلغاء',callback_data='refdist:cancel')]]))
+
+@router.callback_query(F.data.startswith('refdist:'))
+async def referral_distribution_click(q:CallbackQuery):
+    if not admin(q.from_user): return await q.answer('غير مصرح',show_alert=True)
+    parts=q.data.split(':')
+    if parts[1]=='cancel':
+        await q.answer('تم الإلغاء')
+        try: await q.message.edit_reply_markup(reply_markup=None)
+        except Exception: pass
+        return
+    if parts[1]!='confirm' or len(parts)<3: return await q.answer('طلب غير صحيح',show_alert=True)
+    try: token=int(parts[2])
+    except ValueError: return await q.answer('طلب غير صحيح',show_alert=True)
+    now=int(time.time()); paid=[]
+    try:
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            last=int((c.execute("SELECT value FROM settings WHERE key='referral_last_distribution'").fetchone() or ['0'])[0] or 0)
+            if last!=token: return await q.answer('تم التوزيع مسبقاً أو تغيّرت الفترة. افتح التوزيع من جديد.',show_alert=True)
+            plan=referral_plan(c,last,now)
+            for e in plan['eligible']:
+                add_local_balance(c,e['referrer'],e['commission'],q.from_user.id)
+                for ref_user,amt in e['comm'].items():
+                    if amt>0: c.execute("INSERT INTO referral_commissions(referrer_id,referred_id,amount,status,paid_at) VALUES(?,?,?,'paid',CURRENT_TIMESTAMP)",(e['referrer'],ref_user,amt))
+                for did in e['deposit_ids']: c.execute('INSERT INTO referral_paid_deposits(deposit_id,referrer_id,amount) VALUES(?,?,0)',(did,e['referrer']))
+                paid.append((e['referrer'],e['commission']))
+            old_next=next_distribution_ts(); new_next=old_next+REFERRAL_PERIOD
+            while new_next<=now: new_next+=REFERRAL_PERIOD
+            c.execute("INSERT INTO settings(key,value) VALUES('referral_last_distribution',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(str(now),))
+            c.execute("INSERT INTO settings(key,value) VALUES('referral_next_distribution',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(str(new_next),))
+    except Exception:
+        logging.exception('Referral distribution failed')
+        return await q.answer('تعذّر التوزيع، لم يتم تغيير شيء.',show_alert=True)
+    audit(q.from_user.id,'referral_distribution',f'{len(paid)} referrers, {sum(a for _,a in paid)} SYP')
+    await q.answer('تم التوزيع')
+    try: await q.message.edit_reply_markup(reply_markup=None)
+    except Exception: pass
+    for ref,amt in paid:
+        try: await q.bot.send_message(ref,f'💸 تم توزيع أرباح الإحالات: أُضيف {amt:,} SYP إلى رصيدك الداخلي.\n🗓 موعد التوزيع القادم: {fmt_local(new_next)}')
+        except Exception: logging.exception('Referral payout notification failed for %s',ref)
+    await q.message.answer(f'✅ تم توزيع أرباح الإحالات على {len(paid)} وكيل، بإجمالي {sum(a for _,a in paid):,} SYP.\n🗓 الموعد القادم: {fmt_local(new_next)}')
 
 @router.message(F.text.in_(ALL))
 async def services(m:Message,bot:Bot):
@@ -1422,6 +1515,7 @@ def admin_actions_keyboard():
       [InlineKeyboardButton(text='↩️ رجوع للوحة الأدمن',callback_data=BUTTON_IDS['↩️ رجوع للوحة الأدمن'])]])
 
 async def admin_action(message,state,user,action):
+    if action==DIST_LABEL: return await referral_distribution_preview(message)
     if action in ('content','📝 إدارة المحتوى والروابط'):
         keys=[('شروط الاستخدام','terms'),('الشروحات','tutorials'),('رابط التواصل','contact_url'),('رابط VPN','vpn_url'),('رابط APK','apk_url'),('رابط الألعاب','games_url'),('الدخول المباشر','direct_url'),('اللفة المجانية','free_spin')]
         return await message.edit_text('📝 تعديل محتوى الأقسام والروابط',reply_markup=InlineKeyboardMarkup(inline_keyboard=[*[ [InlineKeyboardButton(text=label,callback_data='ac:cfg:'+key)] for label,key in keys], [InlineKeyboardButton(text='↩️ لوحة الأدمن',callback_data=BUTTON_IDS['↩️ رجوع للوحة الأدمن'])]]))
