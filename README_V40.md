@@ -5,3 +5,4 @@ V40
 - HARDLUCK dims the whole screen, then the video plays inside the wheel circle.
 - DB: new table refund_requests, new column wheel_bonuses.kind (auto-migrated).
 - Env: REFUND_CHAT_ID (optional). The bot must be a member/admin of that channel.
+V40.1: removed the disclosure note under the wheel; wheel now has a single HARDLUCK slice (7 slices: HARDLUCK, 200, BONUS 5%, 500, CASHBACK 5%, 1000, 2000). Server logic unchanged.
