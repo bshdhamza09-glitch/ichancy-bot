@@ -1,0 +1,1 @@
+V38: HARDLUCK video overlays the entire circular wheel with no rectangular border or close button. Brief black frame then video. Autoplay tries audio then muted fallback. Telegram may block unmuted autoplay. Upload all files to GitHub, redeploy Railway, then fully close and reopen Telegram Mini App to clear cached V37.
