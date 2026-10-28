@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<meta http-equiv="Cache-Control" content="no-store">
+<title>EL SHEIKH | Spin</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;max-width:100%;overflow-x:hidden}
+body{background:radial-gradient(ellipse at 50% 55%,#12507c 0%,#071c33 52%,#020811 100%);color:#fff;font-family:Arial,Tahoma,sans-serif;min-height:100dvh;display:flex;flex-direction:column;align-items:center;padding-bottom:20px}
+.head{margin:20px 0 4px;font-size:22px;font-weight:900;letter-spacing:2px}
+.sub{color:#a4d8f0;font-size:12px;margin-bottom:10px}
+
+/* الحاوية الثابتة: لا تدور أبداً. العجلة والطبقة السوداء إخوة داخلها. */
+.wheel-stage{position:relative;width:min(92vw,450px);aspect-ratio:1;margin:8px auto 0}
+.wheel{position:absolute;inset:4%;border-radius:50%;border:9px solid #52b9e8;background:#112843;overflow:hidden;
+  box-shadow:0 0 0 4px #173a56,0 0 34px 6px #2aa7e0aa,0 12px 35px #000a;
+  transition:transform 5.5s cubic-bezier(.12,.75,.15,1);will-change:transform}
+.wheel canvas{display:block;width:100%;height:100%}
+.pointer{position:absolute;z-index:6;top:-1%;left:50%;width:0;height:0;transform:translateX(-50%);
+  border-left:15px solid transparent;border-right:15px solid transparent;border-top:38px solid #e5262d;filter:drop-shadow(0 3px 3px #000b)}
+.hub{position:absolute;z-index:5;top:50%;left:50%;transform:translate(-50%,-50%);width:24%;aspect-ratio:1;border-radius:50%;
+  background:linear-gradient(#f1f3f6,#8e9299);border:5px solid #5d6673;box-shadow:0 3px 14px #000b;
+  display:grid;place-items:center;direction:ltr;text-align:center;line-height:1.05;color:#151b28;font-weight:900;font-size:clamp(10px,3.2vw,15px);letter-spacing:.5px;pointer-events:none}
+
+/* طبقة HARDLUCK: دائرة سوداء فوق العجلة بالضبط */
+.hardluck-overlay{position:absolute;inset:4%;z-index:20;border-radius:50%;overflow:hidden;background:#000;display:none;touch-action:manipulation}
+.hardluck-overlay.active{display:flex;align-items:center;justify-content:center}
+.hardluck-overlay video{display:block;width:100%;height:100%;object-fit:contain;background:#000;border:0;border-radius:0;box-shadow:none;outline:0;pointer-events:none;visibility:hidden}
+.hardluck-overlay.playing video{visibility:visible}
+.hardluck-overlay .tapnote{position:absolute;bottom:9%;left:0;right:0;text-align:center;color:#ffffffb0;font-size:12px;display:none;pointer-events:none}
+.hardluck-overlay.needsound .tapnote{display:block}
+.wheel-stage.hl-active .pointer,.wheel-stage.hl-active .hub{visibility:hidden}
+
+.panel{width:min(90vw,420px);margin:20px auto 0;background:#091b2bcc;border:1px solid #36617b;border-radius:15px;padding:16px;text-align:center}
+.status{font-size:17px;font-weight:700;margin:4px 0 8px}
+.btn{width:100%;border:0;border-radius:12px;padding:15px;background:linear-gradient(120deg,#7bd4f5,#299acb);color:#061726;font-weight:900;font-size:18px;margin-top:8px;cursor:pointer}
+.btn:disabled{opacity:.45;cursor:default}
+.result{font-weight:800;color:#b7eaff;min-height:27px;margin-top:12px;line-height:1.5}
+</style>
+</head>
+<body>
+<div class="head">✦ EL SHEIKH ✦</div>
+<div class="sub">عجلة الحظ</div>
+
+<div class="wheel-stage" id="stage">
+  <div class="wheel" id="wheel"><canvas id="c" width="900" height="900"></canvas></div>
+  <div class="hub">EL<br>SHEIKH</div>
+  <div class="pointer"></div>
+  <div class="hardluck-overlay" id="hardOverlay">
+    <video id="hard" src="/miniapp/hardluck.mp4?v=39" playsinline webkit-playsinline preload="auto" disablepictureinpicture disableremoteplayback controlslist="nodownload nofullscreen noremoteplayback"></video>
+    <div class="tapnote" id="tapnote">اضغط على الشاشة لتفعيل الصوت</div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="status" id="count">جارٍ تحميل اللفات...</div>
+  <button class="btn" id="spin" disabled>🎡 لف العجلة</button>
+  <div class="result" id="result"></div>
+</div>
+
+<script>
+(function(){
+'use strict';
+var tg=window.Telegram&&window.Telegram.WebApp;
+try{tg&&tg.ready();tg&&tg.expand();}catch(e){}
+
+/* ---------- رسم العجلة: نتيجتان حقيقيتان فقط (HARDLUCK / BONUS 5%) ---------- */
+var SEG=[];for(var k=0;k<10;k++)SEG.push(k%2===0?'hardluck':'bonus');
+var N=SEG.length,ARC=360/N;
+var cv=document.getElementById('c'),ctx=cv.getContext('2d'),R=450,rad=Math.PI/180;
+for(var i=0;i<N;i++){
+  var a0=(-90+i*ARC)*rad,a1=a0+ARC*rad,isH=SEG[i]==='hardluck';
+  ctx.beginPath();ctx.moveTo(R,R);ctx.arc(R,R,R,a0,a1);ctx.closePath();
+  ctx.fillStyle=isH?((i/2)%2===0?'#16a36f':'#1a3a5c'):(((i-1)/2)%2===0?'#74cdf0':'#3e9fd4');
+  ctx.fill();ctx.lineWidth=3;ctx.strokeStyle='#0b2238';ctx.stroke();
+  ctx.save();ctx.translate(R,R);ctx.rotate(a0+ARC*rad/2);
+  ctx.textAlign='right';ctx.textBaseline='middle';
+  ctx.font='bold 46px Arial';ctx.fillStyle=isH?'#fff':'#06223a';
+  ctx.fillText(isH?'HARDLUCK':'BONUS 5%',R-48,0);
+  ctx.restore();
+}
+
+/* ---------- عناصر الصفحة ---------- */
+var stage=document.getElementById('stage'),wheel=document.getElementById('wheel'),
+    count=document.getElementById('count'),btn=document.getElementById('spin'),result=document.getElementById('result'),
+    video=document.getElementById('hard'),overlay=document.getElementById('hardOverlay');
+var rotation=0,available=0,spinning=false,watchdog=null,hardRunning=false;
+
+/* ---------- طبقة HARDLUCK ---------- */
+function clearWatchdog(){if(watchdog){clearTimeout(watchdog);watchdog=null;}}
+function hideHard(){
+  clearWatchdog();hardRunning=false;
+  try{video.pause();}catch(e){}
+  try{video.currentTime=0;}catch(e){}
+  overlay.classList.remove('active','playing','needsound');
+  stage.classList.remove('hl-active');
+  btn.disabled=spinning||!available;
+}
+function prepareHard(){
+  try{video.pause();video.currentTime=0;video.controls=false;video.muted=false;video.volume=1;video.load();}catch(e){}
+}
+function fallbackHard(msg){hideHard();result.textContent=msg||'HARDLUCK — حظ أوفر باللفة القادمة';}
+function onPlaying(){clearWatchdog();overlay.classList.add('playing');}
+function showHard(){
+  hardRunning=true;
+  stage.classList.add('hl-active');
+  overlay.classList.remove('playing','needsound');
+  overlay.classList.add('active');           /* الدائرة تصبح سوداء فوراً */
+  try{video.currentTime=0;}catch(e){}
+  video.controls=false;video.muted=false;video.volume=1;
+  /* إن لم يبدأ الفيديو خلال 6 ثوانٍ نرجع للعجلة بدل التعليق */
+  watchdog=setTimeout(function(){if(hardRunning&&!overlay.classList.contains('playing'))fallbackHard();},6000);
+  var p;try{p=video.play();}catch(e){p=Promise.reject(e);}
+  if(p&&p.then){p.then(onPlaying).catch(function(){
+    /* منع التشغيل بالصوت: نجرب صامتاً ونتيح الصوت بلمسة */
+    video.muted=true;
+    var q;try{q=video.play();}catch(e){q=Promise.reject(e);}
+    if(q&&q.then){q.then(function(){onPlaying();overlay.classList.add('needsound');})
+      .catch(function(){overlay.classList.add('needsound');document.getElementById('tapnote').textContent='اضغط على الشاشة لتشغيل الفيديو';});}
+  });}
+}
+video.addEventListener('playing',onPlaying);
+video.addEventListener('ended',function(){hideHard();});
+video.addEventListener('error',function(){if(hardRunning)fallbackHard('تعذّر تحميل فيديو HARDLUCK');});
+/* لمسة داخل الدائرة: تفعيل الصوت أو بدء التشغيل المحجوب */
+overlay.addEventListener('click',function(){
+  if(!hardRunning)return;
+  video.muted=false;video.volume=1;
+  var p;try{p=video.play();}catch(e){return;}
+  if(p&&p.then)p.then(function(){onPlaying();overlay.classList.remove('needsound');}).catch(function(){});
+});
+
+/* ---------- الاتصال بالسيرفر ---------- */
+function api(route){
+  return fetch('/api/'+route,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:(tg&&tg.initData)||''})})
+    .then(function(r){return r.json().then(function(j){if(!r.ok)throw new Error(j.error||'خطأ اتصال');return j;});});
+}
+function load(){
+  return api('status').then(function(d){
+    available=d.spins;count.textContent='🎟️ لفاتك المتاحة: '+available;btn.disabled=spinning||hardRunning||!available;
+  }).catch(function(e){count.textContent='افتح العجلة من داخل بوت تلغرام: '+e.message;btn.disabled=true;});
+}
+
+/* ---------- اللف ---------- */
+btn.addEventListener('click',function(){
+  if(spinning||hardRunning)return;
+  spinning=true;btn.disabled=true;result.textContent='⏳ جارٍ تحديد النتيجة...';hideHard();
+  /* تهيئة الفيديو داخل لمسة المستخدم ليسمح المتصفح بتشغيله لاحقاً */
+  try{video.muted=false;video.volume=0;var pp=video.play();if(pp&&pp.then)pp.then(function(){video.pause();video.currentTime=0;video.volume=1;}).catch(function(){video.volume=1;});}catch(e){}
+  api('spin').then(function(d){
+    var outcome=d.outcome==='bonus'?'bonus':'hardluck';
+    if(outcome==='hardluck')prepareHard();
+    var idx=[];for(var i=0;i<N;i++)if(SEG[i]===outcome)idx.push(i);
+    var seg=idx[Math.floor(Math.random()*idx.length)];
+    var jitter=(Math.random()-.5)*ARC*.7;                       /* داخل الشريحة دائماً */
+    var desired=360-((seg+.5)*ARC+jitter);
+    var cur=((rotation%360)+360)%360;
+    rotation+=360*7+((desired-cur+360)%360);
+    wheel.style.transform='rotate('+rotation+'deg)';
+    setTimeout(function(){
+      spinning=false;
+      if(outcome==='bonus'){result.textContent='🎁 ربحت بونص 5% على الإيداع، صالح لمدة 24 ساعة!';}
+      else{result.textContent='HARDLUCK — حظ أوفر باللفة القادمة';showHard();}
+      load();
+    },5600);
+  }).catch(function(e){spinning=false;result.textContent=e.message;load();});
+});
+
+load();
+})();
+</script>
+</body>
+</html>
