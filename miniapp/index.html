@@ -37,7 +37,6 @@ body{background:radial-gradient(ellipse at 50% 55%,#12507c 0%,#071c33 52%,#02081
 .dim{position:fixed;inset:0;z-index:15;background:rgba(0,0,0,.9);opacity:0;visibility:hidden;pointer-events:none;transition:opacity .7s ease,visibility 0s linear .7s}
 .dim.on{opacity:1;visibility:visible;transition:opacity .7s ease}
 .wheel-stage.hl-active{z-index:30}
-.note{width:min(90vw,420px);margin:12px auto 0;color:#6f93aa;font-size:11px;text-align:center;line-height:1.6}
 .panel{width:min(90vw,420px);margin:20px auto 0;background:#091b2bcc;border:1px solid #36617b;border-radius:15px;padding:16px;text-align:center}
 .status{font-size:17px;font-weight:700;margin:4px 0 8px}
 .btn{width:100%;border:0;border-radius:12px;padding:15px;background:linear-gradient(120deg,#7bd4f5,#299acb);color:#061726;font-weight:900;font-size:18px;margin-top:8px;cursor:pointer}
@@ -66,8 +65,7 @@ body{background:radial-gradient(ellipse at 50% 55%,#12507c 0%,#071c33 52%,#02081
   <button class="btn" id="spin" disabled>🎡 لف العجلة</button>
   <div class="result" id="result"></div>
 </div>
-<div class="note">الخانات النقدية (200 / 500 / 1000 / 2000 ل.س) للعرض فقط وليست جوائز قابلة للفوز.<br>الجوائز الفعلية: بونص إيداع 5% (24 ساعة) أو كاش باك 5% (لمرة واحدة).</div>
-<div class="ver">V40</div>
+<div class="ver">V40.1</div>
 
 <script>
 (function(){
@@ -77,7 +75,7 @@ try{tg&&tg.ready();tg&&tg.expand();}catch(e){}
 
 /* ---------- رسم العجلة: نتيجتان حقيقيتان فقط (HARDLUCK / BONUS 5%) ---------- */
 /* 12 خانة: HARDLUCK + بونص 5% + كاش باك 5% (جوائز حقيقية)، والخانات النقدية للعرض فقط ولا يمكن الفوز بها */
-var SEG=['hardluck','cash:200','hardluck','bonus','cash:500','hardluck','cashback','cash:1000','hardluck','cash:2000','hardluck','hardluck'];
+var SEG=['hardluck','cash:200','bonus','cash:500','cashback','cash:1000','cash:2000'];
 var N=SEG.length,ARC=360/N;
 var cv=document.getElementById('c'),ctx=cv.getContext('2d'),R=450,rad=Math.PI/180;
 ctx.direction='ltr';
