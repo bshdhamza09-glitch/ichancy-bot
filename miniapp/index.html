@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-store">
-<title>EL SHEIKH | Spin</title>
+<title>Al_Basha-ichancy | Spin</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -23,7 +23,7 @@ body{background:radial-gradient(ellipse at 50% 55%,#12507c 0%,#071c33 52%,#02081
   border-left:15px solid transparent;border-right:15px solid transparent;border-top:38px solid #e5262d;filter:drop-shadow(0 3px 3px #000b)}
 .hub{position:absolute;z-index:5;top:50%;left:50%;transform:translate(-50%,-50%);width:24%;aspect-ratio:1;border-radius:50%;
   background:linear-gradient(#f1f3f6,#8e9299);border:5px solid #5d6673;box-shadow:0 3px 14px #000b;
-  display:grid;place-items:center;direction:ltr;text-align:center;line-height:1.05;color:#151b28;font-weight:900;font-size:clamp(10px,3.2vw,15px);letter-spacing:.5px;pointer-events:none}
+  display:grid;place-items:center;direction:ltr;text-align:center;line-height:1.05;color:#151b28;font-weight:900;font-size:clamp(8px,2.7vw,13px);letter-spacing:0;pointer-events:none}
 
 /* طبقة HARDLUCK: دائرة سوداء فوق العجلة بالضبط */
 .hardluck-overlay{position:absolute;inset:4%;z-index:20;border-radius:50%;overflow:hidden;background:#000;display:none;touch-action:manipulation}
@@ -47,12 +47,12 @@ body{background:radial-gradient(ellipse at 50% 55%,#12507c 0%,#071c33 52%,#02081
 </head>
 <body>
 <div class="dim" id="dim"></div>
-<div class="head">✦ EL SHEIKH ✦</div>
+<div class="head">✦ Al_Basha-ichancy ✦</div>
 <div class="sub">عجلة الحظ</div>
 
 <div class="wheel-stage" id="stage">
   <div class="wheel" id="wheel"><canvas id="c" width="900" height="900"></canvas></div>
-  <div class="hub">EL<br>SHEIKH</div>
+  <div class="hub">Al_Basha-<br>ichancy</div>
   <div class="pointer"></div>
   <div class="hardluck-overlay" id="hardOverlay">
     <video id="hard" src="/miniapp/hardluck.mp4?v=40" playsinline webkit-playsinline preload="auto" disablepictureinpicture disableremoteplayback controlslist="nodownload nofullscreen noremoteplayback"></video>
@@ -65,7 +65,7 @@ body{background:radial-gradient(ellipse at 50% 55%,#12507c 0%,#071c33 52%,#02081
   <button class="btn" id="spin" disabled>🎡 لف العجلة</button>
   <div class="result" id="result"></div>
 </div>
-<div class="ver">V42</div>
+<div class="ver">V43</div>
 
 <script>
 (function(){
