@@ -18,3 +18,10 @@ V42
 - Loyalty points exchange rebuilt: free wheel spin (60), gift code 20,000 (75), bot balance 35,000 (150), withdrawal without fee (300). Locked prizes show a lock; affordable ones are green. Costs/values editable from admin "🎁 تعديل جوائز نقاط الولاء" (settings loyalty_*).
 - Fee-free withdrawal = one-time token (users.free_withdrawals); returned if the withdrawal is rejected or refunded.
 - Main menu: Ichancy button uses Telegram button style "primary" (blue).
+
+V43
+- Sham Cash withdrawals (SYP and USD, measured in new SYP): max 50,000; larger amounts -> contact @Al_Basha_Ropert (shown in the prompt and in the error).
+- Withdrawal requests: detailed HTML message sent ONLY to WITHDRAWAL_CHAT_ID (admins' private chats only as a last-resort fallback if the channel send fails). User confirmation message is detailed too.
+- "إهداء رصيد": rewritten (Arabic digits, clear errors, balance shown, recipient notified); typed menu labels (gift transfer / gift code / message to admin) now work too.
+- "تواصل معنا": support menu (bot issue / site issue / main menu) with the requested texts.
+- Wheel renamed Al_Basha-ichancy (page title, header, hub, bot message).
