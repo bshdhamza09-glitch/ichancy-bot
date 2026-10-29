@@ -12,3 +12,9 @@ V41
 - Admin: new button "📤 توزيع الإحالات" (first row of the admin panel and inside the referral admin menu). Shows a preview, then pays 5% (setting referral_percent) of approved deposits made by referred users during the period to referrers with >= 3 active referrals (setting referral_min_active). Each deposit is paid once (table referral_paid_deposits). Next distribution moves forward by 10 days.
 - Settings keys: referral_next_distribution, referral_last_distribution (epoch seconds). Defaults: next = 2026-10-28 19:00 Damascus.
 - Existing button ids are unchanged, new buttons use their own ids.
+
+V42
+- Wheel button message: "يجب ان تشحن للحصول على لفة مجانية".
+- Loyalty points exchange rebuilt: free wheel spin (60), gift code 20,000 (75), bot balance 35,000 (150), withdrawal without fee (300). Locked prizes show a lock; affordable ones are green. Costs/values editable from admin "🎁 تعديل جوائز نقاط الولاء" (settings loyalty_*).
+- Fee-free withdrawal = one-time token (users.free_withdrawals); returned if the withdrawal is rejected or refunded.
+- Main menu: Ichancy button uses Telegram button style "primary" (blue).
