@@ -26,13 +26,17 @@ LOYALTY_EXCHANGES_DEFAULT = {1: 2, 6: 20, 12: 50}  # points -> local SYP bot cre
 REQUIRED_CHANNEL = os.getenv('REQUIRED_CHANNEL', '@IchancyElSheikh').strip()
 DEPOSIT_CHAT_ID = os.getenv('DEPOSIT_CHAT_ID', '').strip()
 WITHDRAWAL_CHAT_ID = os.getenv('WITHDRAWAL_CHAT_ID', '-1004439550155').strip()
+# Admin notifications (e.g. someone redeemed a fee-free withdrawal). Defaults to the withdrawal-requests channel.
+ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID', '').strip() or WITHDRAWAL_CHAT_ID
 SUPPORT_CHAT_ID = os.getenv('SUPPORT_CHAT_ID', '-1004401691217').strip()
 # Withdrawal-refund requests are delivered to this channel (override with REFUND_CHAT_ID in Railway).
 REFUND_CHAT_ID = os.getenv('REFUND_CHAT_ID', '-1004294689688').strip()
 REFUND_LABEL = '↩️ استرداد آخر طلب سحب'
 LEGACY_BONUS_LABEL = '🎁 البونصات والعروض الحالية'  # removed from the menu; kept only so old inline buttons still resolve
 DIST_LABEL = '📤 توزيع الإحالات'  # admin button (first row of the admin panel + referral admin menu)
-SHAM_MAX_WITHDRAW = 50000  # SYP (new), per Sham Cash withdrawal request
+SHAM_MAX_WITHDRAW = 50000  # default per Sham Cash request; editable from admin: setting sham_max_withdraw
+PENDING_LABEL = '📋 الطلبات المعلّقة'
+FEES_LABEL = '💸 عمولة وحدود السحب'
 SUPPORT_USERNAME = '@Al_Basha_Ropert'
 NO_EXPIRY_TS = 4102444800  # 2100-01-01: wheel cashback has no 24h expiry, it is single-use
 SHAM_ACCOUNT = os.getenv('SHAM_ACCOUNT', 'bbcbfd15ad74579eb0b8e9baca872e57').strip()
@@ -57,11 +61,11 @@ ROWS = [
     ['🌟 نقاط الولاء'],
 ]
 ADMIN_ROWS = [
-    [DIST_LABEL],
-    ['👥 المستخدمين', '🎁 العروض والبونصات'],
-    ['🌟 إدارة نقاط الولاء', '📢 الإذاعة'],
+    [DIST_LABEL, PENDING_LABEL],
+    ['👥 المستخدمين', '🌟 إدارة نقاط الولاء'],
+    ['💰 الإحالات', '🎟️ الأكواد'],
     ['⚙️ إعدادات البوت', '📊 التقارير'],
-    ['🎟️ الأكواد', '💰 الإحالات'],
+    ['📢 الإذاعة'],
     ['🏠 القائمة الرئيسية'],
 ]
 USER_ADMIN_ROWS = [
@@ -81,6 +85,7 @@ LOYALTY_ADMIN_ROWS = [
 ]
 SETTINGS_ADMIN_ROWS = [
     ['⚙️ حالة البوت (تشغيل/إيقاف)'],
+    [FEES_LABEL],
     ['⚙️ تعديل سعر الدولار', '🔥 حرق رقم عملية'],
     ['📝 إدارة المحتوى والروابط'],
     ['↩️ رجوع للوحة الأدمن'],
@@ -140,7 +145,62 @@ def db():
     con.row_factory = sqlite3.Row
     return con
 
+
+
+# ---------------------------------------------------------------- undo of the V45 "remove two zeros" conversion
+MIGRATION_REPORT=None
+SETTING_AMOUNT_KEYS=('free_withdraw_max','sham_max_withdraw','loyalty_gift_amount','loyalty_balance_amount','referral_monthly_cap','referral_total_cap')
+
+def prepare_revert_backup():
+    """If this DB was converted by V45 (currency_scale='new'), keep a full copy before restoring the zeros."""
+    if not DB.exists(): return None
+    con=sqlite3.connect(DB,timeout=30)
+    try:
+        if not con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'").fetchone(): return None
+        r=con.execute("SELECT value FROM settings WHERE key='currency_scale'").fetchone()
+        if not r or r[0]!='new': return None
+        dest=DB.with_name(DB.name+f'.pre_revert_{int(time.time())}.bak')
+        dst=sqlite3.connect(dest)
+        try: con.backup(dst)
+        finally: dst.close()
+        return str(dest)
+    finally: con.close()
+
+def revert_redenomination(c,backup_path=None):
+    """One-time: multiply every money amount by 100 again if (and only if) V45 had divided them."""
+    r=c.execute("SELECT value FROM settings WHERE key='currency_scale'").fetchone()
+    if not r or r[0]!='new': return None
+    one=lambda sql: c.execute(sql).fetchone()[0] or 0
+    tabs={x[0] for x in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    rep=dict(backup=backup_path,users_with_balance=one('SELECT COUNT(*) FROM users WHERE bot_balance<>0'),balances_before=one('SELECT COALESCE(SUM(bot_balance),0) FROM users'))
+    for tb,cols in (('users',('bot_balance',)),('bot_ledger',('delta','balance_after')),('deposits',('amount',)),
+                    ('withdrawals',('amount_syp','fee_syp','payout_syp','balance_before','balance_after')),('gift_codes',('amount',)),
+                    ('referral_finance',('amount',)),('referral_commissions',('amount',)),('referral_paid_deposits',('amount',))):
+        if tb in tabs:
+            for col in cols: c.execute(f'UPDATE {tb} SET {col}={col}*100 WHERE {col} IS NOT NULL')
+    for row in c.execute("SELECT id,method,payout_amount,exchange_rate FROM withdrawals").fetchall():
+        if row['method']=='sham_usd':
+            if row['exchange_rate'] is not None: c.execute('UPDATE withdrawals SET exchange_rate=? WHERE id=?',(round(float(row['exchange_rate'])*100,2),row['id']))
+        else:
+            try: c.execute('UPDATE withdrawals SET payout_amount=? WHERE id=?',(str(int(float(row['payout_amount']))*100),row['id']))
+            except (TypeError,ValueError): pass
+    for key in SETTING_AMOUNT_KEYS:
+        x=c.execute('SELECT value FROM settings WHERE key=?',(key,)).fetchone()
+        if x:
+            try: c.execute('UPDATE settings SET value=? WHERE key=?',(str(int(round(float(x['value'])*100))),key))
+            except (TypeError,ValueError): pass
+    x=c.execute("SELECT value FROM settings WHERE key='dollar_rate'").fetchone()
+    if x:
+        try: c.execute("UPDATE settings SET value=? WHERE key='dollar_rate'",(f"{float(str(x['value']).replace(',',''))*100:g}",))
+        except (TypeError,ValueError): pass
+    rep['balances_after']=one('SELECT COALESCE(SUM(bot_balance),0) FROM users')
+    c.execute("UPDATE settings SET value='old' WHERE key='currency_scale'")
+    c.execute('INSERT INTO audit(actor,action,details) VALUES(?,?,?)',(0,'currency_revert',str(rep)))
+    return rep
+
 def init():
+    global MIGRATION_REPORT
+    backup_path=prepare_revert_backup()
     with db() as c:
         c.executescript('''
         CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, referrer INTEGER, points INTEGER NOT NULL DEFAULT 0, banned INTEGER NOT NULL DEFAULT 0, joined TEXT DEFAULT CURRENT_TIMESTAMP);
@@ -166,6 +226,7 @@ def init():
         CREATE TABLE IF NOT EXISTS wheel_plays(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,outcome TEXT NOT NULL,played_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS wheel_bonuses(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,percent INTEGER NOT NULL DEFAULT 5,expires_at INTEGER NOT NULL,used_deposit_id INTEGER UNIQUE);
         CREATE TABLE IF NOT EXISTS referral_paid_deposits(deposit_id INTEGER PRIMARY KEY, referrer_id INTEGER NOT NULL, amount INTEGER NOT NULL, paid_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS cashback_claims(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,deposit_id INTEGER NOT NULL UNIQUE,deposit_amount INTEGER NOT NULL,cashback_amount INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'armed',created_at TEXT DEFAULT CURRENT_TIMESTAMP,requested_at TEXT,reviewed_by INTEGER,reviewed_at TEXT);
         CREATE TABLE IF NOT EXISTS refund_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,withdrawal_id INTEGER NOT NULL UNIQUE,user_id INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'pending',requested_at TEXT DEFAULT CURRENT_TIMESTAMP,reviewed_by INTEGER,reviewed_at TEXT);
         
         ''')
@@ -177,17 +238,24 @@ def init():
         for col in ('balance_before','balance_after'):
             if col not in withdrawal_cols:
                 c.execute(f'ALTER TABLE withdrawals ADD COLUMN {col} INTEGER')
+        if 'used_free' not in withdrawal_cols:
+            c.execute('ALTER TABLE withdrawals ADD COLUMN used_free INTEGER NOT NULL DEFAULT 0')
         cols={r[1] for r in c.execute('PRAGMA table_info(users)')}
         if 'bot_balance' not in cols: c.execute('ALTER TABLE users ADD COLUMN bot_balance INTEGER NOT NULL DEFAULT 0')
+        MIGRATION_REPORT=revert_redenomination(c,backup_path)  # restores the zeros if V45 had removed them
         c.execute("INSERT OR IGNORE INTO settings VALUES ('enabled','1')")
         c.execute("INSERT OR IGNORE INTO settings VALUES ('bonuses','لا توجد عروض حالية')")
         # Apply this requested default once, without overwriting later admin edits.
         if not c.execute("SELECT 1 FROM settings WHERE key='bonuses_v20_applied'").fetchone():
             c.execute("INSERT INTO settings(key,value) VALUES('bonuses','لا توجد عروض حالية') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
             c.execute("INSERT INTO settings(key,value) VALUES('bonuses_v20_applied','1')")
-        for key,value in [('dollar_rate','14250'),('cashback','10'),('weekly_cashback','10'),('referral_reward','0'),('referral_percent','5'),('loyalty_cost_spin','60'),('loyalty_cost_gift','75'),('loyalty_gift_amount','20000'),('loyalty_cost_balance','150'),('loyalty_balance_amount','35000'),('loyalty_cost_nofee','300'),('referral_next_distribution',str(int(datetime(2026,10,28,19,0,tzinfo=timezone(timedelta(hours=3))).timestamp()))),('referral_last_distribution',str(int(datetime(2026,10,18,19,0,tzinfo=timezone(timedelta(hours=3))).timestamp()))),('referral_min_active','3'),('referral_min_transfers','3'),('referral_min_days','3'),('referral_maturity_days','7'),('referral_monthly_cap','500000'),('referral_total_cap','5000000'),('terms','يرجى الالتزام بشروط استخدام البوت.'),('tutorials','لا توجد شروحات منشورة حالياً.'),('vpn_url',''),('apk_url',''),('games_url',''),('direct_url',''),('contact_url',''),('free_spin','غير متاح حالياً.'),('current_prize','لا توجد جائزة حالية.'),('sham_codes',''),('syriatel_codes','')]:
+        for key,value in [('dollar_rate','14250'),('cashback','10'),('weekly_cashback','10'),('referral_reward','0'),('referral_percent','5'),('withdraw_fee_percent','10'),('free_withdraw_max','10000'),('sham_max_withdraw','50000'),('loyalty_cost_spin','60'),('loyalty_cost_gift','75'),('loyalty_gift_amount','200'),('loyalty_cost_balance','150'),('loyalty_balance_amount','350'),('loyalty_cost_nofee','300'),('referral_next_distribution',str(int(datetime(2026,10,28,19,0,tzinfo=timezone(timedelta(hours=3))).timestamp()))),('referral_last_distribution',str(int(datetime(2026,10,18,19,0,tzinfo=timezone(timedelta(hours=3))).timestamp()))),('referral_min_active','3'),('referral_min_transfers','3'),('referral_min_days','3'),('referral_maturity_days','7'),('referral_monthly_cap','5000'),('referral_total_cap','500000'),('terms','يرجى الالتزام بشروط استخدام البوت.'),('tutorials','لا توجد شروحات منشورة حالياً.'),('vpn_url',''),('apk_url',''),('games_url',''),('direct_url',''),('contact_url',''),('free_spin','غير متاح حالياً.'),('current_prize','لا توجد جائزة حالية.'),('sham_codes',''),('syriatel_codes','')]:
             c.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)',(key,value))
 
+        if not c.execute("SELECT 1 FROM settings WHERE key='prize_amounts_v47'").fetchone():
+            for k,old,new in (('loyalty_gift_amount','20000','200'),('loyalty_balance_amount','35000','350'),('referral_monthly_cap','500000','5000'),('referral_total_cap','5000000','500000')):
+                c.execute('UPDATE settings SET value=? WHERE key=? AND value=?',(new,k,old))
+            c.execute("INSERT INTO settings(key,value) VALUES('prize_amounts_v47','1')")
         for points,credit in LOYALTY_EXCHANGES_DEFAULT.items():
             c.execute('INSERT OR IGNORE INTO loyalty_exchange_options(points,credit,active) VALUES(?,?,1)',(points,credit))
 
@@ -236,13 +304,68 @@ def setting(k):
     return row['value'] if row else ''
 
 # Inline buttons render inside the chat message for BOTH menus.
-BUTTON_IDS = {label: f'btn_{i}' for i, label in enumerate(dict.fromkeys(
-    [(LEGACY_BONUS_LABEL if label == REFUND_LABEL else label) for group in ROWS + ADMIN_ROWS + USER_ADMIN_ROWS + BONUS_ADMIN_ROWS + LOYALTY_ADMIN_ROWS + SETTINGS_ADMIN_ROWS + REPORT_ADMIN_ROWS + CODE_ADMIN_ROWS + REFERRAL_ADMIN_ROWS for label in group if label != DIST_LABEL] +
-    ['🎁 استبدال نقاط', '➕ منح نقاط ولاء', '🎁 إنشاء جائزة ولاء', '👮 لوحة تحكم الإدارة', '↩️ رجوع للوحة الأدمن']
-))}
-# Old menus already sent to users still carry the old button id: it must NOT trigger the refund flow.
+# Button ids are frozen so menus that users/admins already have in their chats keep pointing at the same actions.
+LEGACY_BUTTON_ORDER = [
+ "🟥 Ichancy",
+ "💸 شحن رصيد البوت",
+ "💰 سحب رصيد البوت",
+ "💸 نظام الإحالات",
+ "🎟️ إهداء رصيد",
+ "🎁 كود هدية",
+ "📝 رسالة للأدمن",
+ "💌 تواصل معنا",
+ "✅ السجل",
+ "⚠️ الشروحات",
+ "↗️ Vpn لتشغيل كامل أقسام الموقع",
+ "↗️ ichancy apk",
+ "💜 الشروط والأحكام",
+ "💵 اللفة المجانية",
+ "🎁 البونصات والعروض الحالية",
+ "🎰 ألعاب Ichancy",
+ "⭐ دخول مباشر للألعاب",
+ "🌟 نقاط الولاء",
+ "👥 المستخدمين",
+ "🎁 العروض والبونصات",
+ "🌟 إدارة نقاط الولاء",
+ "📢 الإذاعة",
+ "⚙️ إعدادات البوت",
+ "📊 التقارير",
+ "🎟️ الأكواد",
+ "💰 الإحالات",
+ "🏠 القائمة الرئيسية",
+ "🔎 البحث عن مستخدم",
+ "📜 سجل مستخدم",
+ "➕ إضافة رصيد",
+ "➖ خصم رصيد",
+ "🚫 حظر مستخدم",
+ "🔓 فك حظر مستخدم",
+ "↩️ رجوع للوحة الأدمن",
+ "📝 تعديل نص العروض والبونصات",
+ "➕ منح نقاط ولاء",
+ "➖ خصم نقاط ولاء",
+ "🎁 تعديل جوائز نقاط الولاء",
+ "⚙️ حالة البوت (تشغيل/إيقاف)",
+ "⚙️ تعديل سعر الدولار",
+ "🔥 حرق رقم عملية",
+ "📝 إدارة المحتوى والروابط",
+ "📊 تقرير",
+ "🎟️ إضافة كود",
+ "💳 تعديل أكواد شام كاش",
+ "💳 تعديل أكواد سيريتل كاش",
+ "⚙️ إعدادات نظام الإحالات",
+ "📋 سجل إحالات البوت",
+ "🎁 استبدال نقاط",
+ "🎁 إنشاء جائزة ولاء",
+ "👮 لوحة تحكم الإدارة"
+]
+BUTTON_IDS = {label: f'btn_{i}' for i, label in enumerate(LEGACY_BUTTON_ORDER)}
 BUTTON_IDS[REFUND_LABEL] = 'btn_refund_wd'
-BUTTON_IDS[DIST_LABEL] = 'btn_ref_dist'  # own id so older menus keep pointing at the same actions
+BUTTON_IDS[DIST_LABEL] = 'btn_ref_dist'
+BUTTON_IDS[PENDING_LABEL] = 'btn_pending_req'
+BUTTON_IDS[FEES_LABEL] = 'btn_fees_cfg'
+for _g in ROWS + ADMIN_ROWS + USER_ADMIN_ROWS + BONUS_ADMIN_ROWS + LOYALTY_ADMIN_ROWS + SETTINGS_ADMIN_ROWS + REPORT_ADMIN_ROWS + CODE_ADMIN_ROWS + REFERRAL_ADMIN_ROWS:
+    for _l in _g:
+        BUTTON_IDS.setdefault(_l, f'btn_n{len(BUTTON_IDS)}')
 ID_BUTTONS = {v: k for k, v in BUTTON_IDS.items()}
 
 STYLE_BY_LABEL = {'🟥 Ichancy': 'primary'}  # Bot API button colours: primary=blue, success=green, danger=red
@@ -259,6 +382,89 @@ def keyboard(rows):
         [sbtn(label, BUTTON_IDS[label], STYLE_BY_LABEL.get(label)) for label in group]
         for group in rows
     ])
+
+
+# ---------------------------------------------------------------- admin panel helpers
+BAR='━━━━━━━━━━━━━━━━'
+
+def admin_counts():
+    with db() as c:
+        q=lambda sql: c.execute(sql).fetchone()[0]
+        return dict(users=q('SELECT COUNT(*) FROM users'),banned=q('SELECT COUNT(*) FROM users WHERE banned=1'),
+                    wd=q("SELECT COUNT(*) FROM withdrawals WHERE status='pending'"),dep=q("SELECT COUNT(*) FROM deposits WHERE status='pending'"),
+                    ref=q("SELECT COUNT(*) FROM refund_requests WHERE status='pending'"),cbk=q("SELECT COUNT(*) FROM cashback_claims WHERE status='requested'"),claims=q("SELECT COUNT(*) FROM claims WHERE status='pending'"))
+
+def bot_state_line():
+    return '🟢 البوت يعمل' if setting('enabled')=='1' else '⏸️ البوت موقوف للمستخدمين (الأدمن يعمل)'
+
+def admin_panel_text():
+    k=admin_counts()
+    return (f'👮 لوحة تحكم الإدارة — {NAME}\n{BAR}\n{bot_state_line()}\n👥 المستخدمون: {k["users"]:,}   🚫 محظورون: {k["banned"]:,}\n\n'
+            f'📋 بانتظار المعالجة:\n• 💸 طلبات سحب: {k["wd"]}\n• 💳 طلبات إيداع: {k["dep"]}\n• ↩️ طلبات استرداد سحب: {k["ref"]}\n• 💸 طلبات تعويض كاش باك: {k["cbk"]}\n\n'
+            f'📤 توزيع الإحالات القادم: {fmt_local(next_distribution_ts())} (توقيت دمشق)'+(' ⏰ حان الموعد' if next_distribution_ts()<=time.time() else '')+f'\n{BAR}\nاختر القسم المطلوب 👇')
+
+def admin_menu_text(label):
+    if label=='🌟 إدارة نقاط الولاء':
+        return ('🌟 إدارة نقاط الولاء\n'+BAR+'\n• ➕ منح نقاط ولاء: إضافة نقاط لمستخدم\n• ➖ خصم نقاط ولاء: سحب نقاط من مستخدم\n'
+                '• 🎁 تعديل جوائز نقاط الولاء: تكلفة وقيمة الجوائز الأربع (لفة، كود هدية، رصيد، سحب بدون عمولة)\n\n'
+                f'التكلفة الحالية: لفة {setting("loyalty_cost_spin")} | كود {setting("loyalty_cost_gift")} | رصيد {setting("loyalty_cost_balance")} | سحب مجاني {setting("loyalty_cost_nofee")} نقطة')
+    if label=='⚙️ إعدادات البوت':
+        return ('⚙️ إعدادات البوت\n'+BAR+f'\n• الحالة الحالية: {bot_state_line()}\n• سعر الدولار (شام كاش): {setting("dollar_rate")} ل.س\n'
+                f'• عمولة السحب: {fee_percent():g}% | سحب بدون عمولة حتى {int_setting("free_withdraw_max",10000):,} | حد شام كاش {sham_max():,}\n\n'
+                '• ⚙️ حالة البوت: تشغيل/إيقاف للمستخدمين\n• 💸 عمولة وحدود السحب: النسبة والحدود\n• ⚙️ تعديل سعر الدولار\n• 🔥 حرق رقم عملية: منع إعادة استخدامه\n• 📝 إدارة المحتوى والروابط: الشروط، الشروحات، الروابط')
+    if label=='📊 التقارير':
+        return '📊 التقارير\n'+BAR+'\n• 📊 تقرير: ملخص شامل للمستخدمين والإيداعات والسحوبات والعجلة والإحالات'
+    if label=='🎟️ الأكواد':
+        return '🎟️ إدارة الأكواد\n'+BAR+'\n• 🎟️ إضافة كود: كود هدية برصيد داخلي\n• 💳 تعديل أكواد شام كاش / سيريتل كاش: أرقام استقبال الإيداع'
+    if label=='💰 الإحالات':
+        return ('💰 إدارة الإحالات\n'+BAR+'\n• 📤 توزيع الإحالات: معاينة ثم صرف الأرباح بعد تأكيدك\n• ⚙️ إعدادات نظام الإحالات: النسبة والحد الأدنى وغيرها\n• 📋 سجل إحالات البوت: أكثر المُحيلين\n\n'
+                f'النسبة: {setting("referral_percent")}% | الحد الأدنى للإحالات النشطة: {setting("referral_min_active")}\nالموعد القادم: {fmt_local(next_distribution_ts())}')
+    return None
+
+def pending_text():
+    with db() as c:
+        wd=c.execute("SELECT id,user_id,method,amount_syp FROM withdrawals WHERE status='pending' ORDER BY id LIMIT 8").fetchall()
+        dep=c.execute("SELECT id,user_id,method,amount FROM deposits WHERE status='pending' ORDER BY id LIMIT 8").fetchall()
+        rf=c.execute("SELECT r.id,r.withdrawal_id,r.user_id FROM refund_requests r WHERE r.status='pending' ORDER BY r.id LIMIT 8").fetchall()
+    k=admin_counts()
+    def block(title,n,rows,fmt): return f'{title} ({n})\n'+('\n'.join(fmt(r) for r in rows) if rows else '• لا يوجد')+('\n• ... والمزيد' if n>len(rows) else '')
+    return ('📋 الطلبات المعلّقة\n'+BAR+'\n'+
+            block('💸 سحب',k['wd'],wd,lambda r:f"• #{r['id']} | {r['user_id']} | {WITHDRAW_METHOD_NAMES.get(r['method'],r['method'])} | {r['amount_syp']:,} ل.س")+'\n\n'+
+            block('💳 إيداع',k['dep'],dep,lambda r:f"• #{r['id']} | {r['user_id']} | {r['method']} | {r['amount']:,} ل.س")+'\n\n'+
+            block('↩️ استرداد سحب',k['ref'],rf,lambda r:f"• طلب #{r['id']} للسحب #{r['withdrawal_id']} | {r['user_id']}")+
+            f'\n\n💸 تعويض كاش باك: {k["cbk"]} طلب بانتظار التحقق\n🎁 جوائز ولاء معلقة: {k["claims"]}\n{BAR}\nتُعالَج الطلبات من أزرار قنواتها (سحب / إيداع / استرداد).')
+
+def report_text():
+    with db() as c:
+        q=lambda sql,*a: c.execute(sql,a).fetchone()
+        u=q("SELECT COUNT(*),SUM(banned=1),SUM(joined>=datetime('now','-1 day')),COALESCE(SUM(bot_balance),0),COALESCE(SUM(points),0) FROM users")
+        dp=q("SELECT SUM(status='approved'),COALESCE(SUM(CASE WHEN status='approved' THEN amount END),0),SUM(status='pending'),SUM(status='approved' AND reviewed_at>=datetime('now','-1 day')),COALESCE(SUM(CASE WHEN status='approved' AND reviewed_at>=datetime('now','-1 day') THEN amount END),0) FROM deposits")
+        wd=q("SELECT SUM(status='approved'),COALESCE(SUM(CASE WHEN status='approved' THEN amount_syp END),0),SUM(status='pending'),COALESCE(SUM(CASE WHEN status='pending' THEN amount_syp END),0),SUM(status='rejected'),SUM(status='refunded'),COALESCE(SUM(CASE WHEN status='approved' THEN fee_syp END),0) FROM withdrawals")
+        wh=q("SELECT (SELECT COUNT(*) FROM wheel_spins),COUNT(*),SUM(outcome='hardluck'),SUM(outcome='bonus'),SUM(outcome='cashback') FROM wheel_plays")
+        rf=q("SELECT COUNT(DISTINCT referrer) FROM users WHERE referrer IS NOT NULL"),q("SELECT COUNT(*) FROM users WHERE referrer IS NOT NULL"),q("SELECT COALESCE(SUM(amount),0) FROM referral_commissions WHERE status='paid'")
+        lx=q("SELECT COUNT(*) FROM audit WHERE action='loyalty_prize_exchange'")
+        cb=q("SELECT SUM(status='armed'),SUM(status='requested'),SUM(status='paid'),COALESCE(SUM(CASE WHEN status='paid' THEN cashback_amount END),0),SUM(status='rejected') FROM cashback_claims")
+    n=lambda v:int(v or 0)
+    return (f'📊 تقرير شامل — {NAME}\n{BAR}\n'
+            f'👥 المستخدمون\n• الإجمالي: {n(u[0]):,} | محظور: {n(u[1])} | جدد آخر 24س: {n(u[2])}\n• مجموع أرصدة البوت الداخلية: {n(u[3]):,} ل.س\n• مجموع نقاط الولاء: {n(u[4]):,}\n\n'
+            f'💳 الإيداعات\n• المعتمدة: {n(dp[0])} بإجمالي {n(dp[1]):,} ل.س | معلّقة: {n(dp[2])}\n• آخر 24 ساعة: {n(dp[3])} بإجمالي {n(dp[4]):,} ل.س\n\n'
+            f'💸 السحوبات\n• المعتمدة: {n(wd[0])} بإجمالي {n(wd[1]):,} ل.س | العمولات المحصّلة: {n(wd[6]):,} ل.س\n• معلّقة: {n(wd[2])} ({n(wd[3]):,} ل.س) | مرفوضة: {n(wd[4])} | مستردة: {n(wd[5])}\n\n'
+            f'🎡 العجلة\n• لفات ممنوحة: {n(wh[0])} | لفات مُنفّذة: {n(wh[1])}\n• HARDLUCK: {n(wh[2])} | بونص 5%: {n(wh[3])} | كاش باك 5%: {n(wh[4])}\n\n'
+            f'💰 الإحالات\n• وكلاء لديهم إحالات: {n(rf[0][0])} | إجمالي الإحالات: {n(rf[1][0])}\n• أرباح موزّعة: {n(rf[2][0]):,} ل.س\n\n'
+            f'💸 الكاش باك\n• مفعّل: {n(cb[0])} | مطلوب: {n(cb[1])} | مصروف: {n(cb[2])} ({n(cb[3]):,} ل.س) | مرفوض: {n(cb[4])}\n\n🌟 الولاء\n• عمليات استبدال الجوائز: {n(lx[0])}\n{BAR}\n🕒 {datetime.now(DAMASCUS).strftime("%Y-%m-%d %H:%M")} (توقيت دمشق)')
+
+CONFIG_NAMES={'withdraw_fee_percent':('عمولة السحب العادية (%)','أرسل النسبة من 0 إلى 100 (مثال: 10 أو 7.5).'),
+              'free_withdraw_max':('حد «سحب بدون عمولة» (ل.س)','أرسل أعلى مبلغ يُسمح فيه بالسحب المجاني (مثال: 10000). المبالغ الأكبر تُحسب بالعمولة العادية.'),
+              'sham_max_withdraw':('الحد الأقصى لسحب شام كاش (ل.س)','أرسل الحد الأقصى لطلب سحب شام كاش (مثال: 50000).')}
+
+def fees_text():
+    return ('💸 عمولة وحدود السحب\n'+BAR+f'\n• عمولة السحب العادية: {fee_percent():g}%\n• «سحب بدون عمولة» (جائزة الولاء): للمبالغ حتى {int_setting("free_withdraw_max",10000):,} ل.س فقط\n'
+            f'• الحد الأقصى لسحب شام كاش: {sham_max():,} ل.س (للمبالغ الأكبر يتواصل المستخدم مع {SUPPORT_USERNAME})\n{BAR}\nاضغط على القيمة التي تريد تعديلها 👇')
+
+def fees_keyboard():
+    rows=[[InlineKeyboardButton(text=f'✏️ {CONFIG_NAMES[k][0]}',callback_data='ac:cfg:'+k)] for k in ('withdraw_fee_percent','free_withdraw_max','sham_max_withdraw')]
+    rows.append([InlineKeyboardButton(text='↩️ رجوع للوحة الأدمن',callback_data=BUTTON_IDS['↩️ رجوع للوحة الأدمن'])])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def back():
     return keyboard([['🏠 القائمة الرئيسية'],['↩️ رجوع للوحة الأدمن']])
@@ -342,6 +548,20 @@ def balance_of(uid):
         r=c.execute('SELECT bot_balance FROM users WHERE id=?',(uid,)).fetchone()
     return int(r['bot_balance']) if r else 0
 
+def int_setting(key,default):
+    try: return int(float(setting(key) or default))
+    except (TypeError,ValueError): return default
+
+def fee_percent():
+    try:
+        v=float(setting('withdraw_fee_percent') or 10)
+        return v if 0<=v<=100 else 10.0
+    except (TypeError,ValueError): return 10.0
+
+def calc_fee(syp,pct): return (int(syp)*int(round(pct*100))+9999)//10000
+
+def sham_max(): return int_setting('sham_max_withdraw',SHAM_MAX_WITHDRAW)
+
 def withdrawal_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='🟥 سيرياتيل كاش',callback_data='wd:syriatel')],
@@ -379,10 +599,10 @@ async def withdrawal_choose(q:CallbackQuery,state:FSMContext):
     display_balance=f'${Decimal(bal)/rate:,.2f}' if method=='sham_usd' else f'{bal:,} ليرة سورية جديدة'
     title={'syriatel':'🟥 سيرياتيل كاش','sham_syp':'💠 شام كاش (SYP)','sham_usd':'💠 شام كاش (USD)'}[method]
     currency='USD' if method=='sham_usd' else 'SYP'
-    bounds='⬇️ الحد الأدنى للسحب: 400\n⬆️ الحد الأقصى للسحب: 50000\n\n' if method=='syriatel' else f'⬆️ الحد الأقصى للسحب: {SHAM_MAX_WITHDRAW} ليرة سورية جديدة\n📩 للمبالغ الكبيرة يرجى مراسلة الدعم {SUPPORT_USERNAME}\n\n'
+    bounds='⬇️ الحد الأدنى للسحب: 400\n⬆️ الحد الأقصى للسحب: 50000\n\n' if method=='syriatel' else f'⬆️ الحد الأقصى للسحب: {sham_max()} ليرة سورية جديدة\n📩 للمبالغ الكبيرة يرجى مراسلة الدعم {SUPPORT_USERNAME}\n\n'
     await state.set_state(Input.withdrawal_amount)
     await state.update_data(withdrawal_method=method)
-    await q.message.answer(f'{title}\n\n💱 العملة: {currency}\n\n{bounds}🏷 رسوم السحب: 10%\n\n💰 رصيدك الحالي: {display_balance}\n\nادخل المبلغ الذي تريد سحبه ⏳'+('\n(المبلغ بالدولار، وسعر الصرف المعتمد: '+str(rate)+' SYP لكل USD)' if method=='sham_usd' else ''))
+    await q.message.answer(f'{title}\n\n💱 العملة: {currency}\n\n{bounds}🏷 رسوم السحب: {fee_percent():g}%\n\n💰 رصيدك الحالي: {display_balance}\n\nادخل المبلغ الذي تريد سحبه ⏳'+('\n(المبلغ بالدولار، وسعر الصرف المعتمد: '+str(rate)+' SYP لكل USD)' if method=='sham_usd' else ''))
 
 @router.message(Command('cancel'))
 @router.message(F.text.in_({'/الغاء العملية الحالية', '/إلغاء العملية الحالية', 'إلغاء العملية الحالية'}))
@@ -418,7 +638,7 @@ async def start(m: Message, state:FSMContext):
 async def panel(m:Message,state:FSMContext):
     if not admin(m.from_user): return await m.answer('غير مصرح لك بالدخول.')
     await state.clear()
-    await m.answer('👮 لوحة تحكم الإدارة — Sheikh',reply_markup=keyboard(ADMIN_ROWS))
+    await m.answer(admin_panel_text(),reply_markup=keyboard(ADMIN_ROWS))
 
 @router.message(F.text == '🏠 القائمة الرئيسية')
 async def go_home(m:Message,state:FSMContext):
@@ -433,7 +653,7 @@ def loyalty_prizes():
     def g(key,default):
         try: return int(float(setting(key) or default))
         except (TypeError,ValueError): return default
-    gift=g('loyalty_gift_amount',20000); bal=g('loyalty_balance_amount',35000)
+    gift=g('loyalty_gift_amount',200); bal=g('loyalty_balance_amount',350)
     return [dict(key='spin',emoji='🎡',title='لفة عجلة مجانية',cost=g('loyalty_cost_spin',60)),
             dict(key='gift',emoji='🎁',title=f'كود هدية ({gift:,})',cost=g('loyalty_cost_gift',75),amount=gift),
             dict(key='balance',emoji='💰',title=f'رصيد بالبوت ({bal:,})',cost=g('loyalty_cost_balance',150),amount=bal),
@@ -483,18 +703,21 @@ async def withdrawal_amount(m:Message,state:FSMContext):
         return await m.answer('❌ اكتب مبلغ السحب بالأرقام فقط، مثل 2000.')
     if syp <= 0:
         return await m.answer('❌ اكتب مبلغ سحب أكبر من صفر.')
-    if method in ('sham_syp','sham_usd') and syp>SHAM_MAX_WITHDRAW:
-        return await m.answer(f'❌ الحد الأقصى للسحب عبر شام كاش هو {SHAM_MAX_WITHDRAW} ليرة سورية جديدة.\n📩 للمبالغ الكبيرة يرجى مراسلة الدعم {SUPPORT_USERNAME}')
+    if method in ('sham_syp','sham_usd') and syp>sham_max():
+        return await m.answer(f'❌ الحد الأقصى للسحب عبر شام كاش هو {sham_max()} ليرة سورية جديدة.\n📩 للمبالغ الكبيرة يرجى مراسلة الدعم {SUPPORT_USERNAME}')
     if method=='syriatel' and not (400<=syp<=50000): return await m.answer('❌ المبلغ لازم يكون بين 400 و50000 ليرة سورية جديدة.')
     if syp>balance_of(m.from_user.id): return await m.answer('❌ رصيدك غير كافٍ. لا يمكنك سحب أكثر من رصيدك الداخلي.')
     with db() as c: fr=c.execute('SELECT free_withdrawals FROM users WHERE id=?',(m.from_user.id,)).fetchone()
-    has_free=bool(fr and fr['free_withdrawals']>0)
-    fee=0 if has_free else (syp*10+99)//100
+    pct=fee_percent(); free_max=int_setting('free_withdraw_max',10000)
+    has_token=bool(fr and fr['free_withdrawals']>0)
+    has_free=has_token and syp<=free_max   # fee-free prize only for amounts up to the cap
+    fee=0 if has_free else calc_fee(syp,pct)
     payout=syp-fee
     if payout<=0: return await m.answer('❌ المبلغ أقل من رسوم السحب.')
     out=f'{Decimal(payout)/rate:.2f}' if method=='sham_usd' else str(payout)
     await state.update_data(withdrawal_syp=syp,withdrawal_fee=fee,withdrawal_payout=payout,withdrawal_out=out,withdrawal_rate=rate,withdrawal_free=has_free)
     if has_free: await m.answer('💸 سيتم استخدام «سحب بدون عمولة» من جوائزك لهذا الطلب (بدون رسوم).')
+    elif has_token: await m.answer(f'ℹ️ «سحب بدون عمولة» متاح للمبالغ حتى {free_max:,} ليرة سورية جديدة فقط. هذا الطلب أكبر من ذلك، لذلك سيُحسب بالعمولة العادية ({pct:g}%) وتبقى سحبتك المجانية محفوظة لطلب لاحق.')
     await state.set_state(Input.withdrawal_address)
     if method=='syriatel': return await m.answer('📱 أرسل رقم السيرياتيل الذي ترغب في استقبال أرباحك عليه:')
     with db() as c: bound=c.execute('SELECT account FROM sham_verified WHERE user_id=?',(m.from_user.id,)).fetchone()
@@ -523,8 +746,8 @@ async def withdrawal_address(m:Message,state:FSMContext):
             if data.get('withdrawal_free') and not c.execute('UPDATE users SET free_withdrawals=free_withdrawals-1 WHERE id=? AND free_withdrawals>0',(m.from_user.id,)).rowcount: raise LookupError('free')
             before=c.execute('SELECT bot_balance FROM users WHERE id=?',(m.from_user.id,)).fetchone()['bot_balance']
             new=add_local_balance(c,m.from_user.id,-data['withdrawal_syp'],m.from_user.id)
-            cur=c.execute('INSERT INTO withdrawals(user_id,method,amount_syp,fee_syp,payout_syp,payout_currency,payout_amount,exchange_rate,recipient,balance_before,balance_after) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(
-                m.from_user.id,method,data['withdrawal_syp'],data['withdrawal_fee'],data['withdrawal_payout'],'USD' if method=='sham_usd' else 'SYP',data['withdrawal_out'],data['withdrawal_rate'] if method=='sham_usd' else None,recipient,before,new))
+            cur=c.execute('INSERT INTO withdrawals(user_id,method,amount_syp,fee_syp,payout_syp,payout_currency,payout_amount,exchange_rate,recipient,balance_before,balance_after,used_free) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(
+                m.from_user.id,method,data['withdrawal_syp'],data['withdrawal_fee'],data['withdrawal_payout'],'USD' if method=='sham_usd' else 'SYP',data['withdrawal_out'],float(data['withdrawal_rate']) if method=='sham_usd' and data.get('withdrawal_rate') is not None else None,recipient,before,new,1 if data.get('withdrawal_free') else 0))
             wid=cur.lastrowid
     except LookupError: return await m.answer('❌ تعذّر استخدام «سحب بدون عمولة» (استُهلك). أعد طلب السحب من البداية.')
     except ValueError: return await m.answer('❌ الرصيد غير كافٍ أو تغيّر أثناء الطلب. لم يتم تقديم السحب.')
@@ -543,7 +766,7 @@ def withdrawal_request_text(wid):
         wd=c.execute("SELECT COUNT(*) n,COALESCE(SUM(amount_syp),0) s FROM withdrawals WHERE user_id=? AND status='approved'",(r['user_id'],)).fetchone()
     name=escape((u['first_name'] if u and u['first_name'] else '-')); uname=('@'+escape(u['username'])) if u and u['username'] else '-'
     cur=r['payout_currency']; rate=f"\n• سعر الصرف: {r['exchange_rate']} SYP لكل USD" if r['method']=='sham_usd' and r['exchange_rate'] else ''
-    fee=f"{r['fee_syp']:,} ل.س" if r['fee_syp'] else 'بدون رسوم (جائزة سحب مجاني)'
+    fee='بدون رسوم (جائزة سحب مجاني)' if r['used_free'] else (f"{r['fee_syp']:,} ل.س" if r['fee_syp'] else 'بدون رسوم')
     return (f"📤 <b>طلب سحب جديد #{wid}</b>\n━━━━━━━━━━━━━━━━\n"
             f"👤 <b>المستخدم</b>\n• الاسم: {name}\n• اليوزر: {uname}\n• الآيدي: <code>{r['user_id']}</code>\n━━━━━━━━━━━━━━━━\n"
             f"💳 <b>تفاصيل الطلب</b>\n• طريقة السحب: {WITHDRAW_METHOD_NAMES.get(r['method'],r['method'])}\n"
@@ -584,7 +807,7 @@ async def review_withdrawal(q:CallbackQuery):
         c.execute('UPDATE withdrawals SET status=?,reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?',('approved' if action=='approve' else 'rejected',q.from_user.id,wid))
         if action=='reject':
             add_local_balance(c,r['user_id'],r['amount_syp'],q.from_user.id)
-            if r['fee_syp']==0: c.execute('UPDATE users SET free_withdrawals=free_withdrawals+1 WHERE id=?',(r['user_id'],))  # give back the fee-free token
+            if r['used_free']: c.execute('UPDATE users SET free_withdrawals=free_withdrawals+1 WHERE id=?',(r['user_id'],))  # give back the fee-free token
     await q.answer('تمت معالجة الطلب')
     try: await q.message.edit_reply_markup(reply_markup=None)
     except Exception: pass
@@ -651,7 +874,7 @@ async def review_refund(q:CallbackQuery):
                 else:
                     c.execute("UPDATE withdrawals SET status='refunded',reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'",(q.from_user.id,w['id']))
                     add_local_balance(c,w['user_id'],w['amount_syp'],q.from_user.id)
-                    if w['fee_syp']==0: c.execute('UPDATE users SET free_withdrawals=free_withdrawals+1 WHERE id=?',(w['user_id'],))
+                    if w['used_free']: c.execute('UPDATE users SET free_withdrawals=free_withdrawals+1 WHERE id=?',(w['user_id'],))
                     c.execute("UPDATE refund_requests SET status='approved',reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?",(q.from_user.id,rid)); outcome='approved'
     except Exception:
         logging.exception('Refund review failed')
@@ -667,6 +890,65 @@ async def review_refund(q:CallbackQuery):
     try: await q.bot.send_message(rr['user_id'],notes[outcome])
     except Exception: logging.exception('Refund notification to user failed')
     await q.message.answer(f'استرداد السحب #{wid}: {outcome} بواسطة {q.from_user.id}')
+
+@router.callback_query(F.data.startswith('cbk:'))
+async def cashback_click(q:CallbackQuery):
+    parts=q.data.split(':'); action=parts[1] if len(parts)>1 else ''
+    if action=='list':
+        with db() as c: rows=c.execute("SELECT id,deposit_amount,cashback_amount FROM cashback_claims WHERE user_id=? AND status='armed' ORDER BY id DESC LIMIT 10",(q.from_user.id,)).fetchall()
+        if not rows: return await q.answer('لا يوجد كاش باك مفعّل لديك حالياً.',show_alert=True)
+        await q.answer()
+        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"إيداع {r['deposit_amount']:,} ← تعويض {r['cashback_amount']:,} ل.س",callback_data=f"cbk:req:{r['id']}")] for r in rows])
+        return await q.message.answer('💸 الكاش باك المفعّل لديك\nاختر الإيداع الذي خسرته لطلب التعويض (5%).\nيتم التحقق من الخسارة من قبل الإدارة قبل صرف التعويض.',reply_markup=kb)
+    try: cid=int(parts[2])
+    except (IndexError,ValueError): return await q.answer('طلب غير صحيح',show_alert=True)
+    if action=='req':
+        uid=q.from_user.id
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            ok=c.execute("UPDATE cashback_claims SET status='requested',requested_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=? AND status='armed'",(cid,uid)).rowcount
+            row=c.execute('SELECT * FROM cashback_claims WHERE id=?',(cid,)).fetchone()
+        if not ok: return await q.answer('تم طلب هذا التعويض مسبقاً أو غير متاح.',show_alert=True)
+        fu=q.from_user
+        from html import escape
+        text=(f'💸 <b>طلب تعويض كاش باك #{cid}</b>\n{BAR}\n👤 الاسم: {escape(fu.first_name or "-")}\n• اليوزر: {("@"+escape(fu.username)) if getattr(fu,"username",None) else "-"}\n• الآيدي: <code>{uid}</code>\n'
+              f'💳 الإيداع #{row["deposit_id"]}: {row["deposit_amount"]:,} ل.س\n💰 التعويض المطلوب (5%): <b>{row["cashback_amount"]:,}</b> ل.س\n{BAR}\n⚠️ وافق فقط بعد التأكد من أن المستخدم خسر مبلغ هذا الإيداع على الموقع.')
+        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ تأكيد الخسارة وصرف التعويض',callback_data=f'cbk:ok:{cid}'),InlineKeyboardButton(text='❌ رفض',callback_data=f'cbk:no:{cid}')]])
+        sent=False
+        for dest in dict.fromkeys([d for d in (ADMIN_CHAT_ID,) if d]):
+            try: await q.bot.send_message(dest,text,parse_mode='HTML',reply_markup=kb); sent=True
+            except Exception: logging.exception('Cashback request failed to %s',dest)
+        if not sent:
+            for dest in ADMIN_IDS:
+                try: await q.bot.send_message(dest,text,parse_mode='HTML',reply_markup=kb); sent=True
+                except Exception: logging.exception('Cashback fallback failed to %s',dest)
+        if not sent:
+            with db() as c: c.execute("UPDATE cashback_claims SET status='armed',requested_at=NULL WHERE id=? AND status='requested'",(cid,))
+            return await q.answer('تعذّر إرسال الطلب حالياً، حاول لاحقاً.',show_alert=True)
+        await q.answer('تم إرسال طلبك للإدارة ✅',show_alert=True)
+        return await q.message.answer(f'✅ تم إرسال طلب تعويض الكاش باك #{cid} ({row["cashback_amount"]:,} ل.س) إلى الإدارة. سيصلك إشعار بالنتيجة بعد التحقق.')
+    if action in ('ok','no'):
+        if not admin(q.from_user): return await q.answer('غير مصرح',show_alert=True)
+        out=None
+        try:
+            with db() as c:
+                c.execute('BEGIN IMMEDIATE')
+                row=c.execute('SELECT * FROM cashback_claims WHERE id=?',(cid,)).fetchone()
+                if not row or row['status']!='requested': out='done'
+                elif action=='ok':
+                    add_local_balance(c,row['user_id'],row['cashback_amount'],q.from_user.id)
+                    c.execute("UPDATE cashback_claims SET status='paid',reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?",(q.from_user.id,cid)); out='paid'
+                else:
+                    c.execute("UPDATE cashback_claims SET status='rejected',reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?",(q.from_user.id,cid)); out='rejected'
+        except Exception:
+            logging.exception('Cashback review failed'); return await q.answer('تعذّرت المعالجة',show_alert=True)
+        if out=='done': return await q.answer('الطلب عولج مسبقاً',show_alert=True)
+        await q.answer('تمت المعالجة')
+        try: await q.message.edit_reply_markup(reply_markup=None)
+        except Exception: pass
+        try: await q.bot.send_message(row['user_id'],(f'✅ تمت الموافقة على طلب الكاش باك #{cid}: أُضيف {row["cashback_amount"]:,} ل.س إلى رصيدك الداخلي.' if out=='paid' else f'❌ تم رفض طلب الكاش باك #{cid} لعدم التأكد من الخسارة.'))
+        except Exception: logging.exception('Cashback notification failed')
+        await q.message.answer(f'تعويض الكاش باك #{cid}: {out} بواسطة {q.from_user.id}')
 
 @router.callback_query(F.data=='verify_join')
 async def verify_join(q:CallbackQuery):
@@ -758,11 +1040,15 @@ async def review_deposit(q:CallbackQuery):
         if action=='approve':
             # Redeem exactly one unexpired, unused bonus on this approved deposit.
             bonus_row=c.execute('SELECT id,percent,kind FROM wheel_bonuses WHERE user_id=? AND used_deposit_id IS NULL AND expires_at>? ORDER BY expires_at,id LIMIT 1',(r['user_id'],int(time.time()))).fetchone()
-            bonus_amount=0;bonus_label='بونص العجلة'
+            bonus_amount=0;claim_id=None;claim_amount=0
             if bonus_row:
-                if bonus_row['kind']=='cashback': bonus_label='كاش باك العجلة'
-                bonus_amount=r['amount']*bonus_row['percent']//100
                 c.execute('UPDATE wheel_bonuses SET used_deposit_id=? WHERE id=? AND used_deposit_id IS NULL',(did,bonus_row['id']))
+                if bonus_row['kind']=='cashback':
+                    # Cashback = compensation: 5% of this deposit, payable only if the user loses it (admin verifies).
+                    claim_amount=r['amount']*bonus_row['percent']//100
+                    if claim_amount>0: claim_id=c.execute('INSERT OR IGNORE INTO cashback_claims(user_id,deposit_id,deposit_amount,cashback_amount) VALUES(?,?,?,?)',(r['user_id'],did,r['amount'],claim_amount)).lastrowid
+                else:
+                    bonus_amount=r['amount']*bonus_row['percent']//100
             new=add_local_balance(c,r['user_id'],r['amount']+bonus_amount,q.from_user.id)
             earned_points = r['amount'] // 200
             if earned_points > 0:
@@ -774,7 +1060,14 @@ async def review_deposit(q:CallbackQuery):
     await q.answer('تمت معالجة الطلب')
     try: await q.message.edit_reply_markup(reply_markup=None)
     except Exception: pass
-    try: await q.bot.send_message(r['user_id'],f'{"✅ تمت الموافقة على" if action=="approve" else "❌ تم رفض"} طلب الإيداع #{did}.' + (f'\nرصيدك الداخلي الآن: {new}\n🎁 {bonus_label}: {bonus_amount} SYP\n🌟 نقاط الولاء المكتسبة: {earned_points} (نقطة لكل 200 SYP جديدة)' if action=='approve' else ''))
+    note=''
+    if action=='approve':
+        note=f'\nرصيدك الداخلي الآن: {new:,} ل.س'
+        if bonus_amount: note+=f'\n🎁 بونص العجلة 5%: +{bonus_amount:,} ل.س (أُضيفت لرصيدك)'
+        if claim_id: note+=f'\n💸 كاش باك مفعّل على هذا الإيداع: إذا خسرت المبلغ تستطيع طلب تعويض 5% = {claim_amount:,} ل.س (اضغط الزر أدناه عند الحاجة).'
+        note+=f'\n🌟 نقاط الولاء المكتسبة: {earned_points} (نقطة لكل 200 SYP جديدة)'
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='💸 طلب تعويض الكاش باك',callback_data=f'cbk:req:{claim_id}')]]) if (action=='approve' and claim_id) else None
+    try: await q.bot.send_message(r['user_id'],f'{"✅ تمت الموافقة على" if action=="approve" else "❌ تم رفض"} طلب الإيداع #{did}.'+note,reply_markup=kb)
     except Exception: pass
     await q.message.answer(f'الطلب #{did}: {status} بواسطة {q.from_user.id}.')
 
@@ -814,14 +1107,14 @@ async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
     if label == '↩️ رجوع للوحة الأدمن':
         if not admin(q.from_user): return await q.answer('غير مصرح', show_alert=True)
         await state.clear()
-        return await q.message.edit_text('👮 لوحة تحكم الإدارة — Sheikh', reply_markup=keyboard(ADMIN_ROWS))
+        return await q.message.edit_text(admin_panel_text(), reply_markup=keyboard(ADMIN_ROWS))
     if label == '👥 المستخدمين':
         if not admin(q.from_user): return await q.answer('غير مصرح', show_alert=True)
         return await show_user_list(q.message, 0)
     if label in ADMIN_MENUS and label != '🌟 نقاط الولاء':
         if not admin(q.from_user): return await q.answer('غير مصرح', show_alert=True)
         title, rows=ADMIN_MENUS[label]
-        return await q.message.edit_text(title, reply_markup=keyboard(rows))
+        return await q.message.edit_text(admin_menu_text(label) or title, reply_markup=keyboard(rows))
     if label == '🏠 القائمة الرئيسية':
         return await go_home(m, state)
     if label == LEGACY_BONUS_LABEL:  # stale menu button: just refresh the menu
@@ -897,9 +1190,17 @@ async def loyalty_exchange(q:CallbackQuery):
             result=f'💰 تمت إضافة {prize["amount"]:,} ل.س إلى رصيدك الداخلي. رصيدك الآن: {bal:,} ل.س'
         else:
             c.execute('UPDATE users SET free_withdrawals=free_withdrawals+1 WHERE id=?',(uid,))
-            result='💸 حصلت على «سحب بدون عمولة» لمرة واحدة، يُطبّق تلقائياً على طلب السحب القادم.'
+            result=f'💸 حصلت على «سحب بدون عمولة» لمرة واحدة، يُطبّق تلقائياً على أول طلب سحب بمبلغ حتى {int_setting("free_withdraw_max",10000):,} ليرة سورية جديدة. المبالغ الأكبر تُحسب بالعمولة العادية.'
         points=c.execute('SELECT points FROM users WHERE id=?',(uid,)).fetchone()['points']
+        free_now=c.execute('SELECT free_withdrawals FROM users WHERE id=?',(uid,)).fetchone()['free_withdrawals']
         c.execute('INSERT INTO audit(actor,action,details) VALUES(?,?,?)',(uid,'loyalty_prize_exchange',f'{key}: {cost} points'))
+    if key=='nofee' and ADMIN_CHAT_ID:
+        fu=q.from_user; from html import escape
+        try:
+            await q.bot.send_message(ADMIN_CHAT_ID,'💸 <b>استبدال «سحب بدون عمولة»</b>\n━━━━━━━━━━━━━━━━\n'
+                f'👤 الاسم: {escape(fu.first_name or "-")}\n• اليوزر: {("@"+escape(fu.username)) if getattr(fu,"username",None) else "-"}\n• الآيدي: <code>{uid}</code>\n'
+                f'⭐ النقاط المخصومة: {cost}\n🌟 نقاطه المتبقية: {points:,}\n🎟️ سحبات مجانية متاحة له الآن: {free_now}\n🕒 {datetime.now(DAMASCUS).strftime("%Y-%m-%d %H:%M")} (توقيت دمشق)',parse_mode='HTML')
+        except Exception: logging.exception('Admin notification for fee-free withdrawal failed')
     await q.answer('تم الاستبدال بنجاح ✅',show_alert=True)
     await q.message.answer(f'✅ تم استبدال {cost} نقطة.\n{result}\n🌟 نقاطك المتبقية: {points:,}',parse_mode='HTML')
     await q.message.answer(loyalty_menu_text(points),reply_markup=loyalty_exchange_keyboard(points))
@@ -1078,11 +1379,7 @@ async def users(m:Message):
 @router.message(F.text == '📊 تقرير')
 async def report(m:Message):
     if not admin(m.from_user): return
-    with db() as c:
-        total=c.execute('SELECT COUNT(*) n FROM users').fetchone()['n']
-        pending=c.execute("SELECT COUNT(*) n FROM claims WHERE status='pending'").fetchone()['n']
-        approved=c.execute("SELECT COUNT(*) n FROM claims WHERE status='approved'").fetchone()['n']
-    await m.answer(f'📊 تقرير البوت\nالمستخدمون: {total}\nجوائز معلقة: {pending}\nجوائز معتمدة: {approved}\nالعمليات المالية الخارجية: غير مفعّلة')
+    await m.answer(report_text(),reply_markup=keyboard([['↩️ رجوع للوحة الأدمن']]))
 
 @router.message(F.text == '🔎 البحث عن مستخدم')
 async def lookup_start(m:Message,state:FSMContext):
@@ -1122,7 +1419,7 @@ async def toggle(m:Message):
     v='0' if setting('enabled')=='1' else '1'
     with db() as c: c.execute("UPDATE settings SET value=? WHERE key='enabled'",(v,))
     audit(m.from_user.id,'bot_enabled',v)
-    await m.answer('البوت مفعّل' if v=='1' else 'البوت موقوف للمستخدمين (الأدمن يعمل).')
+    await m.answer('🟢 تم تشغيل البوت — المستخدمون يستطيعون استخدامه الآن.' if v=='1' else '⏸️ تم إيقاف البوت — المستخدمون لا يستطيعون استخدامه (الأدمن يعمل).')
 
 @router.message(F.text.in_({'📝 تعديل نص البونصات والعروض الحالية', '📝 تعديل نص العروض والبونصات'}))
 async def bonus_start(m:Message,state:FSMContext):
@@ -1398,7 +1695,10 @@ async def services(m:Message,bot:Bot,state:FSMContext=None):
     if m.text=='💵 اللفة المجانية':
         url=os.getenv('MINIAPP_URL','').strip()
         if not url: return await m.answer('تطبيق العجلة غير مفعّل بعد. أضف MINIAPP_URL في Railway.')
-        return await m.answer('🎡 عجلة Al_Basha-ichancy\nيجب ان تشحن للحصول على لفة مجانية',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🎡 افتح عجلة الحظ',web_app=WebAppInfo(url=url))]]))
+        rows=[[InlineKeyboardButton(text='🎡 افتح عجلة الحظ',web_app=WebAppInfo(url=url))]]
+        with db() as c: armed=c.execute("SELECT COUNT(*) FROM cashback_claims WHERE user_id=? AND status='armed'",(m.from_user.id,)).fetchone()[0]
+        if armed: rows.append([InlineKeyboardButton(text=f'💸 طلب تعويض الكاش باك ({armed})',callback_data='cbk:list')])
+        return await m.answer('🎡 عجلة Al_Basha-ichancy\nيجب ان تشحن للحصول على لفة مجانية',reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     if m.text=='💌 تواصل معنا': return await contact_menu(m)
     if m.text=='💸 نظام الإحالات':
         return await referral_screen(m,bot,m.from_user.id)
@@ -1432,6 +1732,7 @@ def user_list_markup(page, total, records):
     if page>0: nav.append(InlineKeyboardButton(text='⬅️ السابق',callback_data=f'ul:{page-1}'))
     if (page+1)*8<total: nav.append(InlineKeyboardButton(text='التالي ➡️',callback_data=f'ul:{page+1}'))
     if nav: rows.append(nav)
+    rows.append([InlineKeyboardButton(text='🔎 بحث عن مستخدم (آيدي أو يوزر)',callback_data='ac:🔎 البحث عن مستخدم')])
     rows.append([InlineKeyboardButton(text='↩️ لوحة الأدمن',callback_data=BUTTON_IDS['↩️ رجوع للوحة الأدمن'])])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1534,7 +1835,7 @@ async def transfer_start(m:Message,state:FSMContext):
     with db() as c: u=c.execute('SELECT banned FROM users WHERE id=?',(uid,)).fetchone()
     if u and u['banned']: return await m.answer('حسابك محظور من استخدام الخدمات.')
     await state.set_state(Input.user_transfer)
-    await m.answer(f'🎟️ إهداء رصيد البوت الداخلي\n💰 رصيدك الحالي: {balance_of(uid):,} ل.س\n\nأرسل آيدي المستلم ثم المبلغ في رسالة واحدة:\n<code>123456789 5000</code>\n\n• التحويل نهائي ولا يمس رصيد Ichancy.\n• يجب أن يكون المستلم قد فتح البوت مرة واحدة على الأقل.\n• للإلغاء أرسل /cancel',parse_mode='HTML')
+    await m.answer(f'🎟️ إهداء رصيد البوت الداخلي\n💰 رصيدك الحالي: {balance_of(uid):,} ل.س\n\nأرسل آيدي المستلم ثم المبلغ في رسالة واحدة:\n<code>123456789 5000</code>\n\n• يجب أن يكون المستلم قد فتح البوت مرة واحدة على الأقل.\n• للإلغاء أرسل /cancel',parse_mode='HTML')
 
 @router.message(Input.user_transfer)
 async def transfer_finish(m:Message,state:FSMContext):
@@ -1613,6 +1914,9 @@ def admin_actions_keyboard():
       [InlineKeyboardButton(text='↩️ رجوع للوحة الأدمن',callback_data=BUTTON_IDS['↩️ رجوع للوحة الأدمن'])]])
 
 async def admin_action(message,state,user,action):
+    if action==PENDING_LABEL: return await message.answer(pending_text(),reply_markup=keyboard([['↩️ رجوع للوحة الأدمن']]))
+    if action==FEES_LABEL: return await message.answer(fees_text(),reply_markup=fees_keyboard())
+    if action=='📊 تقرير': return await message.answer(report_text(),reply_markup=keyboard([['↩️ رجوع للوحة الأدمن']]))
     if action==DIST_LABEL: return await referral_distribution_preview(message)
     if action in ('content','📝 إدارة المحتوى والروابط'):
         keys=[('شروط الاستخدام','terms'),('الشروحات','tutorials'),('رابط التواصل','contact_url'),('رابط VPN','vpn_url'),('رابط APK','apk_url'),('رابط الألعاب','games_url'),('الدخول المباشر','direct_url'),('اللفة المجانية','free_spin')]
@@ -1621,7 +1925,7 @@ async def admin_action(message,state,user,action):
         key=action[4:]
         await state.set_state(Input.admin_config)
         await state.update_data(config_key=key)
-        return await message.answer(f'أرسل القيمة الجديدة لـ {key}.')
+        return await message.answer('✏️ '+(CONFIG_NAMES[key][0]+'\n'+CONFIG_NAMES[key][1] if key in CONFIG_NAMES else f'أرسل القيمة الجديدة لـ {key}.')+'\nللإلغاء أرسل /cancel')
     if action in ADMIN_ACTIONS:
         key,prompt=ADMIN_ACTIONS[action]
         await state.set_state(Input.admin_config)
@@ -1649,7 +1953,7 @@ async def admin_action(message,state,user,action):
         v='0' if setting('enabled')=='1' else '1'
         with db() as c: c.execute("UPDATE settings SET value=? WHERE key='enabled'",(v,))
         audit(user.id,'bot_enabled',v)
-        return await message.answer('✅ البوت مفعّل' if v=='1' else '⏸️ البوت متوقف للمستخدمين')
+        return await message.answer('🟢 تم تشغيل البوت — المستخدمون يستطيعون استخدامه الآن.' if v=='1' else '⏸️ تم إيقاف البوت — المستخدمون لا يستطيعون استخدامه (الأدمن يعمل).')
     if action=='🌟 إدارة نقاط الولاء': return await message.answer('🌟 لوحة الولاء',reply_markup=keyboard(LOYALTY_ADMIN_ROWS))
     if action=='➕ منح نقاط ولاء': return await add_start(message,state)
     if action=='➖ خصم نقاط ولاء': return await subtract_points_start(message,state)
@@ -1664,6 +1968,12 @@ async def admin_config_finish(m:Message,state:FSMContext):
     if not admin(m.from_user): return
     data=await state.get_data(); key=data['config_key']; value=(m.text or '').strip()
     if not value or len(value)>3500: return await m.answer('أرسل قيمة نصية لا تتجاوز 3500 حرف.')
+    if key in CONFIG_NAMES:
+        try:
+            v=float(value)
+            if key=='withdraw_fee_percent' and not 0<=v<=100: raise ValueError()
+            if key!='withdraw_fee_percent' and (v<1 or not v.is_integer()): raise ValueError()
+        except ValueError: return await m.answer('❌ القيمة غير صحيحة. '+CONFIG_NAMES[key][1])
     if key.startswith('loyalty_'):
         try:
             if not (1<=int(value)<=100000000): raise ValueError()
@@ -1676,7 +1986,7 @@ async def admin_config_finish(m:Message,state:FSMContext):
     with db() as c: c.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,value))
     audit(m.from_user.id,'config_updated',key)
     await state.clear()
-    await m.answer('✅ تم حفظ التعديل داخل البوت.',reply_markup=admin_actions_keyboard())
+    await m.answer(f'✅ تم الحفظ: {CONFIG_NAMES[key][0] if key in CONFIG_NAMES else key} = {value}',reply_markup=admin_actions_keyboard())
 
 @router.message(Input.admin_code)
 async def admin_code_name(m:Message,state:FSMContext):
@@ -1776,6 +2086,11 @@ async def main():
     logging.basicConfig(level=logging.INFO)
     init()
     bot=Bot(TOKEN)
+    if MIGRATION_REPORT:
+        msg=(f'💱 تم إرجاع الصفرين لكل المبالغ (إلغاء تحويل V45).\n• مستخدمون لديهم رصيد: {MIGRATION_REPORT["users_with_balance"]}\n• مجموع الأرصدة قبل: {MIGRATION_REPORT["balances_before"]:,}\n• مجموع الأرصدة بعد: {MIGRATION_REPORT["balances_after"]:,}\n• نسخة احتياطية قبل الإرجاع: {MIGRATION_REPORT["backup"]}\nتمت العملية مرة واحدة فقط ولن تتكرر. (النسخة الاحتياطية الأصلية .pre_currency محفوظة إن وُجدت، لأن تحويل V45 قرّب الأرصدة لأقرب ليرة.)')
+        for aid in ADMIN_IDS:
+            try: await bot.send_message(aid,msg)
+            except Exception: logging.exception('Currency migration notice failed for %s',aid)
     await bot.set_my_commands([
         BotCommand(command='start', description='🏠 القائمة الرئيسية'),
         BotCommand(command='balance', description='💰 رصيدي في البوت'),
