@@ -468,14 +468,34 @@ def report_text():
 
 CONFIG_NAMES={'withdraw_fee_percent':('عمولة السحب العادية (%)','أرسل النسبة من 0 إلى 100 (مثال: 10 أو 7.5).'),
               'free_withdraw_max':('حد «سحب بدون عمولة» (ل.س)','أرسل أعلى مبلغ يُسمح فيه بالسحب المجاني (مثال: 10000). المبالغ الأكبر تُحسب بالعمولة العادية.'),
-              'sham_max_withdraw':('الحد الأقصى لسحب شام كاش (ل.س)','أرسل الحد الأقصى لطلب سحب شام كاش (مثال: 50000).')}
+              'sham_max_withdraw':('الحد الأقصى لسحب شام كاش (ل.س)','أرسل الحد الأقصى لطلب سحب شام كاش (مثال: 50000).'),
+              'syriatel_min_withdraw':('الحد الأدنى لسحب سيريتل كاش','أرسل مبلغاً صحيحاً موجباً.'),
+              'syriatel_max_withdraw':('الحد الأقصى لسحب سيريتل كاش','أرسل مبلغاً صحيحاً موجباً.'),
+              'syriatel_fee_withdraw':('رسوم سحب سيريتل كاش (%)','أرسل نسبة من 0 إلى 100.'),
+              'sham_min_withdraw':('الحد الأدنى لسحب شام كاش','أرسل مبلغاً صحيحاً موجباً.'),
+              'sham_fee_withdraw':('رسوم سحب شام كاش (%)','أرسل نسبة من 0 إلى 100.')}
+
+def withdraw_limits(method):
+    prefix='syriatel' if method=='syriatel' else 'sham'
+    minimum=int_setting(prefix+'_min_withdraw',400 if prefix=='syriatel' else 1)
+    maximum=int_setting(prefix+'_max_withdraw',50000)
+    try:
+        raw=setting(prefix+'_fee_withdraw')
+        fee=float(raw) if raw is not None and raw!='' else fee_percent()
+        if not 0<=fee<=100: fee=fee_percent()
+    except (TypeError,ValueError): fee=fee_percent()
+    return minimum,maximum,fee
 
 def fees_text():
-    return ('💸 عمولة وحدود السحب\n'+BAR+f'\n• عمولة السحب العادية: {fee_percent():g}%\n• «سحب بدون عمولة» (جائزة الولاء): للمبالغ حتى {int_setting("free_withdraw_max",10000):,} ل.س فقط\n'
-            f'• الحد الأقصى لسحب شام كاش: {sham_max():,} ل.س (للمبالغ الأكبر يتواصل المستخدم مع {SUPPORT_USERNAME})\n{BAR}\nاضغط على القيمة التي تريد تعديلها 👇')
+    rows=[]
+    for method,title in [('syriatel','🟥 سيريتل كاش'),('sham','💠 شام كاش')]:
+        low,high,pct=withdraw_limits(method)
+        rows.append(f'{title}: حد أدنى {low:,} | حد أقصى {high:,} ل.س | رسوم {pct:g}%')
+    return '⚙️ إعدادات السحب\n'+BAR+'\n'+'\n'.join(rows)+'\n\n• جائزة السحب المجاني حتى '+str(int_setting('free_withdraw_max',10000))+' ل.س\nاختر الإعداد المطلوب:'
 
 def fees_keyboard():
-    rows=[[InlineKeyboardButton(text=f'✏️ {CONFIG_NAMES[k][0]}',callback_data='ac:cfg:'+k)] for k in ('withdraw_fee_percent','free_withdraw_max','sham_max_withdraw')]
+    keys=('syriatel_min_withdraw','syriatel_max_withdraw','syriatel_fee_withdraw','sham_min_withdraw','sham_max_withdraw','sham_fee_withdraw','free_withdraw_max')
+    rows=[[InlineKeyboardButton(text='✏️ '+CONFIG_NAMES[k][0],callback_data='ac:cfg:'+k)] for k in keys]
     rows.append([InlineKeyboardButton(text='↩️ رجوع للوحة الأدمن',callback_data=BUTTON_IDS['↩️ رجوع للوحة الأدمن'])])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -615,10 +635,11 @@ async def withdrawal_choose(q:CallbackQuery,state:FSMContext):
     display_balance=f'${Decimal(bal)/rate:,.2f}' if method=='sham_usd' else f'{bal:,} ليرة سورية جديدة'
     title={'syriatel':'🟥 سيرياتيل كاش','sham_syp':'💠 شام كاش (SYP)','sham_usd':'💠 شام كاش (USD)'}[method]
     currency='USD' if method=='sham_usd' else 'SYP'
-    bounds='⬇️ الحد الأدنى للسحب: 400\n⬆️ الحد الأقصى للسحب: 50000\n\n' if method=='syriatel' else f'⬆️ الحد الأقصى للسحب: {sham_max()} ليرة سورية جديدة\n📩 للمبالغ الكبيرة يرجى مراسلة الدعم {SUPPORT_USERNAME}\n\n'
+    low,high,pct=withdraw_limits(method)
+    bounds=f'⬇️ الحد الأدنى للسحب: {low:,} ل.س جديدة\n⬆️ الحد الأقصى للسحب: {high:,} ل.س جديدة\n\n'
     await state.set_state(Input.withdrawal_amount)
     await state.update_data(withdrawal_method=method)
-    await q.message.answer(f'{title}\n\n💱 العملة: {currency}\n\n{bounds}🏷 رسوم السحب: {fee_percent():g}%\n\n💰 رصيدك الحالي: {display_balance}\n\nادخل المبلغ الذي تريد سحبه ⏳'+('\n(المبلغ بالدولار، وسعر الصرف المعتمد: '+str(rate)+' SYP لكل USD)' if method=='sham_usd' else ''))
+    await q.message.answer(f'{title}\n\n💱 العملة: {currency}\n\n{bounds}🏷 رسوم السحب: {pct:g}%\n\n💰 رصيدك الحالي: {display_balance}\n\nادخل المبلغ الذي تريد سحبه ⏳'+('\n(المبلغ بالدولار، وسعر الصرف المعتمد: '+str(rate)+' SYP لكل USD)' if method=='sham_usd' else ''))
 
 @router.message(Command('cancel'))
 @router.message(F.text.in_({'/الغاء العملية الحالية', '/إلغاء العملية الحالية', 'إلغاء العملية الحالية'}))
@@ -804,12 +825,12 @@ async def withdrawal_amount(m:Message,state:FSMContext):
         return await m.answer('❌ اكتب مبلغ السحب بالأرقام فقط، مثل 2000.')
     if syp <= 0:
         return await m.answer('❌ اكتب مبلغ سحب أكبر من صفر.')
-    if method in ('sham_syp','sham_usd') and syp>sham_max():
-        return await m.answer(f'❌ الحد الأقصى للسحب عبر شام كاش هو {sham_max()} ليرة سورية جديدة.\n📩 للمبالغ الكبيرة يرجى مراسلة الدعم {SUPPORT_USERNAME}')
-    if method=='syriatel' and not (400<=syp<=50000): return await m.answer('❌ المبلغ لازم يكون بين 400 و50000 ليرة سورية جديدة.')
+    low,high,pct=withdraw_limits(method)
+    if not low<=syp<=high:
+        return await m.answer(f'❌ مبلغ السحب يجب أن يكون بين {low:,} و{high:,} ليرة سورية جديدة.')
     if syp>balance_of(m.from_user.id): return await m.answer('❌ رصيدك غير كافٍ. لا يمكنك سحب أكثر من رصيدك الداخلي.')
     with db() as c: fr=c.execute('SELECT free_withdrawals FROM users WHERE id=?',(m.from_user.id,)).fetchone()
-    pct=fee_percent(); free_max=int_setting('free_withdraw_max',10000)
+    free_max=int_setting('free_withdraw_max',10000)
     has_token=bool(fr and fr['free_withdrawals']>0)
     has_free=has_token and syp<=free_max   # fee-free prize only for amounts up to the cap
     fee=0 if has_free else calc_fee(syp,pct)
@@ -1945,6 +1966,7 @@ async def services(m:Message,bot:Bot,state:FSMContext=None):
         if m.text=='📝 رسالة للأدمن': return await support_start(m,state)
     if m.text==REFUND_LABEL: return await refund_last_withdrawal(m,bot,m.from_user)
     if m.text=='🟥 Ichancy': return await m.answer('خدمات Ichancy الخارجية غير متصلة حالياً؛ بانتظار الربط الرسمي.')
+    if m.text=='⚠️ الشروحات': return await m.answer('📚 الشروحات',reply_markup=tutorials_keyboard())
     if m.text=='💸 شحن رصيد البوت': return await deposit_menu(m)
     if m.text=='💰 سحب رصيد البوت': return await withdrawal_menu(m,m.from_user.id)
     lookup={'💜 الشروط والأحكام':'terms','⚠️ الشروحات':'tutorials','💵 اللفة المجانية':'free_spin','💌 تواصل معنا':'contact_url','↗️ Vpn لتشغيل كامل أقسام الموقع':'vpn_url','↗️ ichancy apk':'apk_url','🎰 ألعاب Ichancy':'games_url','⭐ دخول مباشر للألعاب':'direct_url'}
@@ -1952,6 +1974,25 @@ async def services(m:Message,bot:Bot,state:FSMContext=None):
         val=setting(lookup[m.text]); return await m.answer(val or 'لم يضف الأدمن محتوى هذا القسم بعد.',reply_markup=keyboard([['🏠 القائمة الرئيسية']]))
     if m.text=='✅ السجل': return await history_menu(m)
     await m.answer('هذا القسم معلوماتي فقط، وليس متصلاً بـ Ichancy.')
+
+
+TUTORIALS = [('ما هو موقع Ichancy؟', 'ما هو موقع Ichancy؟\n\nموقع Ichancy منصة لألعاب الحظ والمراهنات الرياضية وألعاب السلوت والكازينو والألعاب التفاعلية.\n\n1. الرياضة: كرة القدم والسلة والتنس، حيث يُحسب العائد المحتمل بضرب الاحتمال (Odds) في مبلغ الرهان، والربح أو الخسارة مرتبط بالنتيجة.\n2. السلوت: ألعاب دوران وحظ.\n3. الكازينو: الروليت والبلاك جاك والبوكر.\n4. الألعاب: ألعاب مهارة وحظ وتحديات.\n\nالموقع الرسمي: https://ichancy.com'), ('كيفية شحن الرصيد ضمن بوت Ichancy', 'كيفية شحن الرصيد ضمن بوت Ichancy\n\n1. اضغط «شحن رصيد».\n2. اختر طريقة الدفع.\n3. حوّل المبلغ إلى عنوان الاستلام المخصص، مع مراعاة الحد الأدنى المعروض.\n4. أدخل رقم العملية للتحقق الآلي.\n\n✅ يُضاف الرصيد بعد تأكيد الدفع.'), ('كيفية إنشاء حساب Ichancy جديد', 'كيفية إنشاء حساب Ichancy جديد\n\n1. اضغط «Ichancy».\n2. اختر «حساب Ichancy جديد».\n3. أدخل اسم الحساب.\n4. أدخل كلمة مرور من 8 رموز على الأقل.\n5. أدخل المبلغ بالدولار.\n6. انتظر معالجة الطلب.\n\nملاحظة: هذه الخدمة تتطلب ربطاً رسمياً وقد لا تكون مفعلة حالياً.'), ('كيفية سحب الرصيد من بوت Ichancy', 'كيفية سحب الرصيد من بوت Ichancy\n\n1. اضغط «سحب رصيد».\n2. اختر طريقة السحب.\n3. أدخل المبلغ وبيانات الاستلام.\n4. أكد الطلب.\n\n⏳ الطلب بانتظار مراجعة الإدارة والتحويل، وليس سحباً منفذاً فوراً.'), ('كيفية شحن رصيد ضمن حساب Ichancy', 'كيفية شحن رصيد ضمن حساب Ichancy\n\n1. اضغط «Ichancy».\n2. اختر «شحن حساب Ichancy».\n3. أدخل معرّف الحساب أو اسمه.\n4. أدخل المبلغ بالليرة السورية.\n5. انتظر معالجة الطلب.\n\nملاحظة: تتطلب الخدمة ربطاً رسمياً وقد لا تكون مفعلة حالياً.'), ('كيفية سحب رصيد من حساب Ichancy', 'كيفية سحب رصيد من حساب Ichancy\n\n1. اضغط «Ichancy».\n2. اختر «سحب رصيد من حساب Ichancy».\n3. أدخل معرّف الحساب أو اسمه.\n4. أدخل المبلغ بالدولار.\n5. انتظر معالجة الطلب.\n\nملاحظة: تتطلب الخدمة ربطاً رسمياً وقد لا تكون مفعلة حالياً.')]
+
+def tutorials_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        *[[InlineKeyboardButton(text=title,callback_data=f'tutorial:{i}')] for i,(title,_) in enumerate(TUTORIALS)],
+        [InlineKeyboardButton(text='🏠 القائمة الرئيسية',callback_data=BUTTON_IDS['🏠 القائمة الرئيسية'])]])
+
+@router.callback_query(F.data.startswith('tutorial:'))
+async def tutorial_open(q:CallbackQuery):
+    await q.answer()
+    value=q.data.split(':',1)[1]
+    if value=='back': return await q.message.answer('📚 الشروحات',reply_markup=tutorials_keyboard())
+    try: idx=int(value)
+    except ValueError: return
+    if not 0<=idx<len(TUTORIALS): return
+    await q.message.answer(TUTORIALS[idx][1],reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='↩️ رجوع للشروحات',callback_data='tutorial:back')]]))
 
 @router.message(F.text.in_(ADMIN_ALL))
 async def admin_placeholder(m:Message):
@@ -2199,7 +2240,7 @@ def admin_actions_keyboard():
 
 async def admin_action(message,state,user,action):
     if action==PENDING_LABEL: return await message.answer(pending_text(),reply_markup=keyboard([['↩️ رجوع للوحة الأدمن']]))
-    if action==FEES_LABEL: return await message.answer(fees_text(),reply_markup=fees_keyboard())
+    if action in (FEES_LABEL,'⚙️ إعدادات السحب'): return await message.answer(fees_text(),reply_markup=fees_keyboard())
     if action=='📊 تقرير': return await message.answer(report_text(),reply_markup=keyboard([['↩️ رجوع للوحة الأدمن']]))
     if action==DIST_LABEL: return await referral_distribution_preview(message)
     if action in ('content','📝 إدارة المحتوى والروابط'):
@@ -2252,8 +2293,8 @@ async def admin_config_finish(m:Message,state:FSMContext):
     if key in CONFIG_NAMES:
         try:
             v=float(value)
-            if key=='withdraw_fee_percent' and not 0<=v<=100: raise ValueError()
-            if key!='withdraw_fee_percent' and (v<1 or not v.is_integer()): raise ValueError()
+            if (key=='withdraw_fee_percent' or key.endswith('_fee_withdraw')) and not 0<=v<=100: raise ValueError()
+            if not (key=='withdraw_fee_percent' or key.endswith('_fee_withdraw')) and (v<1 or not v.is_integer()): raise ValueError()
         except ValueError: return await m.answer('❌ القيمة غير صحيحة. '+CONFIG_NAMES[key][1])
     if key.startswith('loyalty_'):
         try:
@@ -2264,6 +2305,12 @@ async def admin_config_finish(m:Message,state:FSMContext):
             v=float(value)
             if v<0 or (key=='dollar_rate' and v<=0) or (key in ('cashback','referral_percent') and v>100) or (key.startswith('referral_') and key!='referral_percent' and not v.is_integer()): raise ValueError()
         except ValueError: return await m.answer('القيمة الرقمية غير صحيحة.')
+    if key in ('syriatel_min_withdraw','syriatel_max_withdraw','sham_min_withdraw','sham_max_withdraw'):
+        method='syriatel' if key.startswith('syriatel') else 'sham'
+        lo,hi,_=withdraw_limits(method)
+        if '_min_' in key: lo=int(float(value))
+        else: hi=int(float(value))
+        if lo>hi: return await m.answer('❌ الحد الأدنى لا يمكن أن يكون أكبر من الحد الأقصى.')
     with db() as c: c.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,value))
     audit(m.from_user.id,'config_updated',key)
     await state.clear()
