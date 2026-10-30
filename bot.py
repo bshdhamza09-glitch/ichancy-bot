@@ -11,7 +11,7 @@ from aiogram import Bot, Dispatcher, F, Router, BaseMiddleware
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, CopyTextButton, WebAppInfo, ReplyKeyboardRemove,
+from aiogram.types import (FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, CopyTextButton, WebAppInfo, ReplyKeyboardRemove, ReplyKeyboardMarkup, KeyboardButton,
                            CallbackQuery, Message, BotCommand, BotCommandScopeDefault)
 from dotenv import load_dotenv
 
@@ -124,6 +124,7 @@ class Input(StatesGroup):
     support = State()
     support_confirm = State()
     balance_change = State()
+    admin_quick = State()
     points_change = State()
     admin_config = State()
     user_transfer = State()
@@ -638,7 +639,92 @@ async def start(m: Message, state:FSMContext):
 async def panel(m:Message,state:FSMContext):
     if not admin(m.from_user): return await m.answer('غير مصرح لك بالدخول.')
     await state.clear()
-    await m.answer(admin_panel_text(),reply_markup=keyboard(ADMIN_ROWS))
+    await send_admin_panel(m)
+
+# The admin panel is a normal (reply) keyboard shown under the message box, laid out like the reference screenshots.
+ADMIN_REPLY_ROWS = [
+    ['المستخدمين'],
+    ['🔎 البحث عن مستخدم'],
+    ['تقرير'],
+    ['اضافة كود'],
+    ['📜 سجل مستخدم'],
+    ['💰 توزيع أرباح الإحالات'],
+    ['➕ إضافة رصيد', '➖ خصم رصيد'],
+    ['تعديل نص البونصات و العروض الحالية'],
+    ['اضافة او حذف البونص'],
+    ['الإذاعة'],
+    ['تعديل اكواد سيرياتيل كاش', 'تعديل اكواد شام كاش'],
+    ['⚙️ حالة البوت (تشغيل/إيقاف)'],
+    ['⚙️ تعديل سعر الدولار'],
+    ['🔥 حرق رقم عملية'],
+    ['الكاش باك الأسبوعي 10%'],
+    ['🎁 إدارة الجائزة الحالية'],
+    ['🚫 حظر مستخدم', '🔓 فك حظر مستخدم'],
+    ['القائمة الرئيسية'],
+]
+ADMIN_REPLY_ALL = {t for row in ADMIN_REPLY_ROWS for t in row}
+
+def admin_reply_keyboard():
+    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=t) for t in row] for row in ADMIN_REPLY_ROWS],
+                               resize_keyboard=True,input_field_placeholder='👮 لوحة تحكم الإدارة')
+
+async def send_admin_panel(m):
+    await m.answer(admin_panel_text(),reply_markup=admin_reply_keyboard())
+
+def admin_extras_keyboard():
+    # tools added after the reference design stay reachable from the report message
+    labels=[[PENDING_LABEL],[FEES_LABEL],['🌟 إدارة نقاط الولاء'],['⚙️ إعدادات نظام الإحالات','📋 سجل إحالات البوت'],['📝 إدارة المحتوى والروابط']]
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=l,callback_data=BUTTON_IDS[l]) for l in row] for row in labels])
+
+# label -> (action understood by admin_action) for the buttons that map 1:1 to an existing admin action
+ADMIN_REPLY_ACTIONS = {
+    'اضافة كود':'🎟️ إضافة كود','📜 سجل مستخدم':'📜 سجل مستخدم',
+    'اضافة او حذف البونص':'🎁 إضافة أو حذف البونص','تعديل اكواد شام كاش':'💳 تعديل أكواد شام كاش','تعديل اكواد سيرياتيل كاش':'💳 تعديل أكواد سيريتل كاش',
+    '⚙️ تعديل سعر الدولار':'⚙️ تعديل سعر الدولار','🔥 حرق رقم عملية':'🔥 حرق رقم عملية','الكاش باك الأسبوعي 10%':'💸 الكاش باك الأسبوعي 10%','🎁 إدارة الجائزة الحالية':'🎁 إدارة الجائزة الحالية'}
+
+@router.message(F.text.in_(ADMIN_REPLY_ALL), F.from_user.id.in_(ADMIN_IDS))
+async def admin_reply_dispatch(m:Message,state:FSMContext):
+    t=m.text
+    await state.clear()
+    if t=='المستخدمين':
+        msg=await m.answer('👥 جارٍ تحميل المستخدمين...'); return await show_user_list(msg,0)
+    if t=='🔎 البحث عن مستخدم': return await admin_search_start(m,state)
+    if t=='تقرير': return await m.answer(report_text(),reply_markup=admin_extras_keyboard())
+    if t=='💰 توزيع أرباح الإحالات': return await referral_distribution_preview(m)
+    if t in ('➕ إضافة رصيد','➖ خصم رصيد'):
+        await state.set_state(Input.admin_quick); await state.update_data(qa='credit' if t.startswith('➕') else 'debit')
+        return await m.answer(f"{'➕ إضافة رصيد' if t.startswith('➕') else '➖ خصم رصيد'} (رصيد البوت الداخلي)\nأرسل آيدي المستخدم ثم المبلغ في رسالة واحدة:\n<code>123456789 5000</code>\nللإلغاء اضغط أي زر من اللوحة أو أرسل /cancel",parse_mode='HTML')
+    if t=='تعديل نص البونصات و العروض الحالية': return await bonus_start(m,state)
+    if t=='الإذاعة': return await broadcast_start(m,state)
+    if t=='⚙️ حالة البوت (تشغيل/إيقاف)': return await toggle(m)
+    if t in ('🚫 حظر مستخدم','🔓 فك حظر مستخدم'): return await ban_start(m,state)
+    if t=='القائمة الرئيسية':
+        await m.answer('🏠 تم الخروج من لوحة الإدارة.',reply_markup=ReplyKeyboardRemove())
+        return await home(m)
+    if t in ADMIN_REPLY_ACTIONS: return await admin_action(m,state,m.from_user,ADMIN_REPLY_ACTIONS[t])
+
+@router.message(Input.admin_quick)
+async def admin_quick_finish(m:Message,state:FSMContext):
+    import re, unicodedata
+    if not admin(m.from_user): return
+    raw=''.join(str(unicodedata.decimal(ch)) if ch.isdecimal() else ch for ch in (m.text or '')).replace('٬','').replace(',','')
+    mt=re.fullmatch(r'\s*(\d+)\s+(\d+)\s*',raw)
+    if not mt: return await m.answer('❌ الصيغة غير صحيحة. أرسل الآيدي ثم المبلغ مفصولين بمسافة، مثال:\n123456789 5000')
+    uid,amount=int(mt.group(1)),int(mt.group(2))
+    data=await state.get_data(); credit=data.get('qa')=='credit'
+    if not 0<amount<=1000000000: return await m.answer('❌ المبلغ غير صحيح.')
+    err=None
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('SELECT 1 FROM users WHERE id=?',(uid,)).fetchone(): err='❌ هذا الآيدي غير مسجل في البوت.'
+        else:
+            try: new=add_local_balance(c,uid,amount if credit else -amount,m.from_user.id)
+            except ValueError as e: err=f'❌ {e}'
+    if err: return await m.answer(err)
+    audit(m.from_user.id,'admin_balance_credit' if credit else 'admin_balance_debit',f'{uid}:{amount}')
+    await state.clear()
+    await m.answer(f"✅ تم {'إضافة' if credit else 'خصم'} {amount:,} ل.س {'إلى' if credit else 'من'} المستخدم {uid}.\n💰 رصيده الآن: {new:,} ل.س (داخل البوت فقط)")
+    await notify_user(m.bot,uid,f"{'💰 تمت إضافة' if credit else '➖ تم خصم'} {amount:,} ل.س {'إلى رصيدك' if credit else 'من رصيدك'} الداخلي بواسطة الإدارة.\nرصيدك الآن: {new:,} ل.س")
 
 @router.message(F.text == '🏠 القائمة الرئيسية')
 async def go_home(m:Message,state:FSMContext):
@@ -1107,7 +1193,7 @@ async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
     if label == '↩️ رجوع للوحة الأدمن':
         if not admin(q.from_user): return await q.answer('غير مصرح', show_alert=True)
         await state.clear()
-        return await q.message.edit_text(admin_panel_text(), reply_markup=keyboard(ADMIN_ROWS))
+        return await send_admin_panel(q.message)
     if label == '👥 المستخدمين':
         if not admin(q.from_user): return await q.answer('غير مصرح', show_alert=True)
         return await show_user_list(q.message, 0)
@@ -1394,7 +1480,7 @@ async def lookup_finish(m:Message,state:FSMContext):
         u=c.execute('SELECT * FROM users WHERE id=?' if query.isdigit() else 'SELECT * FROM users WHERE username=? COLLATE NOCASE',(int(query) if query.isdigit() else query,)).fetchone()
     await state.clear()
     if u: return await m.answer(f"👤 {u['first_name']} | {u['id']}",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='فتح ملف المستخدم',callback_data=f"ud:{u['id']}:0")]]))
-    await m.answer('المستخدم غير موجود.',reply_markup=keyboard(ADMIN_ROWS))
+    await m.answer('المستخدم غير موجود.')
 
 @router.message(F.text.in_({'🚫 حظر مستخدم','🔓 فك حظر مستخدم'}))
 async def ban_start(m:Message,state:FSMContext):
@@ -1411,7 +1497,7 @@ async def ban_finish(m:Message,state:FSMContext):
     audit(m.from_user.id,'ban_change',f'{m.text}:{banned}')
     await notify_user(m.bot,int(m.text),'🚫 تم حظر حسابك من البوت بواسطة الإدارة.' if banned else '🔓 تم فك حظر حسابك بواسطة الإدارة.')
     await state.clear()
-    await m.answer('تم تحديث حالة المستخدم.',reply_markup=keyboard(USER_ADMIN_ROWS))
+    await m.answer('✅ تم تحديث حالة المستخدم.')
 
 @router.message(F.text == '⚙️ حالة البوت (تشغيل/إيقاف)')
 async def toggle(m:Message):
@@ -1434,7 +1520,7 @@ async def bonus_finish(m:Message,state:FSMContext):
     with db() as c: c.execute("UPDATE settings SET value=? WHERE key='bonuses'",(m.text[:3000],))
     audit(m.from_user.id,'bonuses_updated')
     await state.clear()
-    await m.answer('تم تحديث نص العروض.',reply_markup=keyboard(ADMIN_ROWS))
+    await m.answer('✅ تم تحديث نص العروض.')
 
 @router.message(F.text == '📢 الإذاعة')
 async def broadcast_start(m:Message,state:FSMContext):
@@ -1454,7 +1540,7 @@ async def broadcast_finish(m:Message,state:FSMContext):
         await asyncio.sleep(0.05)
     audit(m.from_user.id,'broadcast',f'{sent}/{len(ids)}')
     await state.clear()
-    await m.answer(f'تم الإرسال إلى {sent} من {len(ids)} مستخدم.',reply_markup=keyboard(ADMIN_ROWS))
+    await m.answer(f'✅ تم الإرسال إلى {sent} من {len(ids)} مستخدم.')
 
 def support_keyboard(confirm=False):
     rows=[]
@@ -2031,7 +2117,7 @@ async def admin_code_uses(m:Message,state:FSMContext):
         return await m.answer('الكود موجود مسبقاً، أعد المحاولة.')
     audit(m.from_user.id,'gift_code_created',f'{code}:{amount}:{uses}')
     await state.clear()
-    await m.answer(f'✅ تم إنشاء كود الهدية\n🎟️ {code}\n💰 القيمة: {amount}\n👥 عدد المستخدمين: {uses}\nالرصيد داخلي فقط.',reply_markup=keyboard(CODE_ADMIN_ROWS))
+    await m.answer(f'✅ تم إنشاء كود الهدية\n🎟️ {code}\n💰 القيمة: {amount}\n👥 عدد المستخدمين: {uses}\nالرصيد داخلي فقط.')
 
 async def notify_user(bot, uid, text):
     try:

@@ -53,3 +53,8 @@ Changes since V43 (all included in this zip):
  V45: cashback = compensation claims (admin confirms loss), bonus +5% for 24h, prize message inside the bot chat, sham_usd withdrawal fix.
  V46: removed the "remove two zeros" conversion (old scale) + automatic restore for DBs converted by V45.
  V47: prizes 200/350 and referral caps.
+
+V48
+- Admin panel is now a normal keyboard under the message box (placeholder "👮 لوحة تحكم الإدارة"), same buttons/order as the reference screenshots. Opened with /admin or the admin button.
+- "➕ إضافة رصيد / ➖ خصم رصيد" now work directly (send: ID amount). "💰 توزيع أرباح الإحالات" opens the referral distribution preview.
+- Extra tools (pending requests, fees & limits, loyalty, referral settings/log, content) are under the inline buttons of the "تقرير" message.
