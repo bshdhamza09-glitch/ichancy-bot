@@ -58,3 +58,10 @@ V48
 - Admin panel is now a normal keyboard under the message box (placeholder "👮 لوحة تحكم الإدارة"), same buttons/order as the reference screenshots. Opened with /admin or the admin button.
 - "➕ إضافة رصيد / ➖ خصم رصيد" now work directly (send: ID amount). "💰 توزيع أرباح الإحالات" opens the referral distribution preview.
 - Extra tools (pending requests, fees & limits, loyalty, referral settings/log, content) are under the inline buttons of the "تقرير" message.
+
+V49
+- السجل: menu (سجل الشحن / سجل السحب) + paginated logs in the requested format (5 per page, "N Transactions", page-number buttons, newest first, Damascus time; non-approved rows get a status line).
+- Deposit instructions for Sham Cash (USD or SYP buttons) and Syriatel use the requested texts; address/numbers are tap-to-copy (<code>); "عمولة السحب" shows the admin-defined fee. USD deposits are converted with dollar_rate.
+- Removed the "لا توافق إلا بعد تحويل الصافي..." line from withdrawal requests.
+- Loyalty: 1 point per 500 SYP of approved deposit.
+- Cashback is automatic (no admin approval, no user request): one week after the activating deposit, if the user made no (non-rejected) withdrawal request in that week, 5% of all approved deposits in that week is added automatically and the user is notified; otherwise it is voided. Background loop every 10 minutes.
