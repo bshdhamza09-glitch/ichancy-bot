@@ -1,0 +1,1 @@
+V51: ShamCash sender address/name binding from verified API transaction; enforce fixed withdrawal wallet; one unbound withdrawal exception; minimum deposit notices; hide cashback menu notice. Existing refund flow unchanged. IMPORTANT: API response transaction.account must be confirmed as sender account in real integration before production. Test with actual transaction.

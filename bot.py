@@ -226,6 +226,7 @@ def init():
         CREATE TABLE IF NOT EXISTS referral_commissions(id INTEGER PRIMARY KEY AUTOINCREMENT, referrer_id INTEGER NOT NULL, referred_id INTEGER NOT NULL, amount INTEGER NOT NULL CHECK(amount>0), status TEXT NOT NULL DEFAULT 'pending', created TEXT DEFAULT CURRENT_TIMESTAMP, paid_at TEXT);
         CREATE TABLE IF NOT EXISTS deposits(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, method TEXT NOT NULL, amount INTEGER NOT NULL, operation_id TEXT NOT NULL, sender_account TEXT, sender_name TEXT, status TEXT NOT NULL DEFAULT 'pending', requested_at TEXT DEFAULT CURRENT_TIMESTAMP, reviewed_by INTEGER, reviewed_at TEXT, UNIQUE(method,operation_id));
         CREATE TABLE IF NOT EXISTS sham_verified(user_id INTEGER PRIMARY KEY, account TEXT NOT NULL, holder TEXT NOT NULL, verified_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS sham_unbound_withdrawal_once(user_id INTEGER PRIMARY KEY, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS loyalty_deposit_awards(deposit_id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, points INTEGER NOT NULL, created TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS withdrawals(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,method TEXT NOT NULL,amount_syp INTEGER NOT NULL,fee_syp INTEGER NOT NULL,payout_syp INTEGER NOT NULL,payout_currency TEXT NOT NULL,payout_amount TEXT NOT NULL,exchange_rate INTEGER,recipient TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',requested_at TEXT DEFAULT CURRENT_TIMESTAMP,reviewed_by INTEGER,reviewed_at TEXT);
         CREATE TABLE IF NOT EXISTS support_messages(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, body TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP);
@@ -504,7 +505,7 @@ async def deposit_menu(m):
     with db() as c:
         active=c.execute('SELECT expires_at,kind FROM wheel_bonuses WHERE user_id=? AND used_deposit_id IS NULL AND expires_at>? ORDER BY expires_at ASC LIMIT 1',(m.chat.id,int(time.time()))).fetchone()
     if not active: bonus_note=''
-    elif active['kind']=='cashback': bonus_note='\n💸 لديك كاش باك 5%: يتفعّل على إيداعك القادم، وإذا لم تسحب خلال أسبوع يُضاف لك التعويض تلقائياً (لمرة واحدة)'
+    elif active['kind']=='cashback': bonus_note=''  # keep cashback benefit, hide this menu message
     else: bonus_note=f'\n🎁 لديك بونص إيداع 5% متاح حتى {datetime.fromtimestamp(active["expires_at"],timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}'
     await m.answer('💰 اختر طريقة شحن الرصيد الداخلي (تحقق تلقائي):'+bonus_note,reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='🟢 شام كاش - دولار',callback_data='dep:sham_usd'),InlineKeyboardButton(text='🟢 شام كاش - سوري',callback_data='dep:sham')],
@@ -518,11 +519,16 @@ def syriatel_numbers():
 async def deposit_instructions(m,method,uid):
     from html import escape
     if method in ('sham','sham_usd'):
+        with db() as c:
+            bound=c.execute('SELECT account,holder FROM sham_verified WHERE user_id=?',(uid,)).fetchone()
+        identity=(f'\n\n🏦 عنوان السحب المعتمد لديك: <code>{escape(bound["account"])}</code> — {escape(bound["holder"])}' if bound else
+                  '\n\n**حساب شام كاش واحد للإيداع والسحب**\nيُثبَّت حساب شام كاش الذي تودع منه تلقائياً من أول إيداع بهوية ظاهرة، ويصبح الحساب الوحيد للإيداع والسحب.')
+        minimum='2 دولار أمريكي (USD)' if method=='sham_usd' else '200 ليرة سورية جديدة'
         msg=('💳 شحن تلقائي عبر شام كاش\n\n'
              'حوّل إلى العنوان التالي:\n'
              f'<code>{escape(SHAM_ACCOUNT)}</code>\n\n'
              '⚠️ لا تُخفِ بيانات التحويل.\n'
-             'بعد التحويل، أرسل رقم العملية فقط للتحقق التلقائي.')
+             'بعد التحويل، أرسل رقم العملية فقط للتحقق التلقائي.'+f'\n⬇️ الحد الأدنى للشحن: {minimum}'+identity)
         if QR.exists():
             await m.answer_photo(FSInputFile(QR),caption='📸 رمز ShamCash للدفع')
     else:
@@ -530,7 +536,7 @@ async def deposit_instructions(m,method,uid):
         msg=('💳 شحن تلقائي عبر سيريتل كاش\n\n'
              'حوّل إلى أحد الأرقام التالية:\n'
              f'{nums}\n\n'
-             'بعد التحويل، أرسل رقم العملية فقط للتحقق التلقائي.')
+             'بعد التحويل، أرسل رقم العملية فقط للتحقق التلقائي.\n⬇️ الحد الأدنى للشحن: 200 ليرة سورية جديدة')
     # No copy/transfer-completed buttons; FSM starts immediately.
     await m.answer(msg,parse_mode='HTML')
 
@@ -810,11 +816,17 @@ async def withdrawal_amount(m:Message,state:FSMContext):
     elif has_token: await m.answer(f'ℹ️ «سحب بدون عمولة» متاح للمبالغ حتى {free_max:,} ليرة سورية جديدة فقط. هذا الطلب أكبر من ذلك، لذلك سيُحسب بالعمولة العادية ({pct:g}%) وتبقى سحبتك المجانية محفوظة لطلب لاحق.')
     await state.set_state(Input.withdrawal_address)
     if method=='syriatel': return await m.answer('📱 أرسل رقم السيرياتيل الذي ترغب في استقبال أرباحك عليه:')
-    with db() as c: bound=c.execute('SELECT account FROM sham_verified WHERE user_id=?',(m.from_user.id,)).fetchone()
+    from html import escape
+    with db() as c:
+        bound=c.execute('SELECT account,holder FROM sham_verified WHERE user_id=?',(m.from_user.id,)).fetchone()
+        used=c.execute("SELECT 1 FROM sham_unbound_withdrawal_once WHERE user_id=?",(m.from_user.id,)).fetchone()
     if bound:
-        await m.answer(f'🏦 عنوان شام كاش المعتمد لإيداعاتك السابقة:\n<code>{bound["account"]}</code>\n\nأرسل نفس العنوان لتأكيد طلب السحب. لا يمكن تغييره إلا بعد مراجعة الإدارة.',parse_mode='HTML')
+        await m.answer(f'يُحوَّل المبلغ حصراً إلى العنوان الذي أودعت منه: <code>{escape(bound["account"])}</code> — {escape(bound["holder"])}.\n\nأرسل نفس العنوان لتأكيد الطلب.',parse_mode='HTML')
+    elif used:
+        await state.clear()
+        await m.answer('❌ استخدمت استثناء السحب لمرة واحدة. يجب إيداع شام كاش بهوية ظاهرة لتثبيت عنوانك قبل أي سحب آخر.')
     else:
-        await m.answer('🏦 أرسل عنوان شام كاش للسحب.\n⚠️ لا يوجد عنوان مرسل معتمد محفوظ بعد؛ ستراجع الإدارة العنوان يدوياً قبل التحويل.')
+        await m.answer('لا يوجد عنوان مثبّت لحسابك لأنك لم تودع عبر شام كاش منذ تطبيق سياسة العنوان الواحد. يُسمح لك بسحب رصيدك الحالي مرة واحدة فقط إلى عنوان شام كاش تدخله. بعدها يُحوَّل السحب حصراً إلى العنوان الذي تودع منه عند أول إيداع ظاهر.\n\n🏦 أدخل عنوان شام كاش للسحب:')
 
 @router.message(Input.withdrawal_address, F.text, ~F.text.startswith("/"))
 async def withdrawal_address(m:Message,state:FSMContext):
@@ -826,12 +838,19 @@ async def withdrawal_address(m:Message,state:FSMContext):
         return await m.answer('أرسل رقم سيريتل سوري صحيحاً من 10 خانات يبدأ بـ 09.')
     if method.startswith('sham'):
         with db() as c: bound=c.execute('SELECT account FROM sham_verified WHERE user_id=?',(m.from_user.id,)).fetchone()
-        if bound and recipient!=bound['account']: return await m.answer('❌ يجب استخدام عنوان شام كاش المعتمد من إيداعك السابق. راجع الإدارة لتغييره.')
+        if bound and recipient!=bound['account']: return await m.answer('❌ السحب مسموح حصراً إلى عنوان شام كاش المثبّت من إيداعك.')
+        if not bound and not re.fullmatch(r'[A-Za-z0-9]{20,150}',recipient):
+            return await m.answer('❌ أرسل عنوان شام كاش الطويل الصحيح دون مسافات.')
     await state.clear()
     try:
         with db() as c:
             c.execute('BEGIN IMMEDIATE')
             # Reserve funds atomically to prevent duplicate withdrawal requests.
+            if method.startswith('sham'):
+                fixed=c.execute('SELECT account FROM sham_verified WHERE user_id=?',(m.from_user.id,)).fetchone()
+                if fixed and fixed['account']!=recipient: raise PermissionError('different verified wallet')
+                if not fixed:
+                    c.execute('INSERT INTO sham_unbound_withdrawal_once(user_id) VALUES(?)',(m.from_user.id,))
             c.execute('INSERT OR IGNORE INTO users(id) VALUES(?)',(m.from_user.id,))
             if data.get('withdrawal_free') and not c.execute('UPDATE users SET free_withdrawals=free_withdrawals-1 WHERE id=? AND free_withdrawals>0',(m.from_user.id,)).rowcount: raise LookupError('free')
             before=c.execute('SELECT bot_balance FROM users WHERE id=?',(m.from_user.id,)).fetchone()['bot_balance']
@@ -839,6 +858,8 @@ async def withdrawal_address(m:Message,state:FSMContext):
             cur=c.execute('INSERT INTO withdrawals(user_id,method,amount_syp,fee_syp,payout_syp,payout_currency,payout_amount,exchange_rate,recipient,balance_before,balance_after,used_free) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(
                 m.from_user.id,method,data['withdrawal_syp'],data['withdrawal_fee'],data['withdrawal_payout'],'USD' if method=='sham_usd' else 'SYP',data['withdrawal_out'],float(data['withdrawal_rate']) if method=='sham_usd' and data.get('withdrawal_rate') is not None else None,recipient,before,new,1 if data.get('withdrawal_free') else 0))
             wid=cur.lastrowid
+    except sqlite3.IntegrityError: return await m.answer('❌ استثناء سحب شام كاش بدون إيداع مستخدم سابقاً. يجب تثبيت حسابك بإيداع ناجح.')
+    except PermissionError: return await m.answer('❌ العنوان لا يطابق محفظة شام كاش المثبّتة.')
     except LookupError: return await m.answer('❌ تعذّر استخدام «سحب بدون عمولة» (استُهلك). أعد طلب السحب من البداية.')
     except ValueError: return await m.answer('❌ الرصيد غير كافٍ أو تغيّر أثناء الطلب. لم يتم تقديم السحب.')
     await m.answer(f'✅ تم تسجيل طلب السحب #{wid}\n\n💳 الطريقة: {WITHDRAW_METHOD_NAMES[method]}\n💰 المبلغ المحجوز: {data["withdrawal_syp"]:,} ليرة سورية جديدة\n🏷 رسوم السحب: {(str(data["withdrawal_fee"])+" ليرة") if data["withdrawal_fee"] else "بدون رسوم"}\n💸 الصافي المستحق: {data["withdrawal_out"]} {"USD" if method=="sham_usd" else "SYP"}\n🏦 الحساب/الرقم: {recipient}\n💰 رصيدك المتبقي: {new:,} ليرة سورية جديدة\n\n⏳ بانتظار مراجعة الإدارة والتحويل اليدوي.')
@@ -1127,13 +1148,27 @@ async def deposit_reference(m:Message,state:FSMContext):
     except Exception:
         logging.exception('API Syria deposit verification error')
         return await m.answer('⚠️ تعذّر التحقق حالياً، حاول لاحقاً. لم يُضف أي رصيد.')
+    # Verify and lock the actual sender identity returned by ShamCash API.
+    sender_account=sender_name=None
+    if method=='sham':
+        sender_account=str(tx.get('account') or '').strip()
+        sender_name=str(tx.get('from_name') or '').strip()
+        if not re.fullmatch(r'[A-Za-z0-9]{20,150}',sender_account) or not sender_name:
+            return await m.answer('⚠️ لم تُظهر العملية عنوان واسم المُرسل بشكل كافٍ للتحقق. لم يُضف رصيد. تواصل مع الدعم.')
+        if sender_account==API_SYRIA_SHAM_ADDRESS:
+            return await m.answer('⚠️ بيانات المرسل غير واضحة في API. لم يُضف رصيد، تواصل مع الدعم.')
     save(m.from_user)
     # Atomic transaction + unique (method, operation_id) prevents double credit.
     try:
         with db() as c:
             c.execute('BEGIN IMMEDIATE')
-            cur=c.execute('INSERT INTO deposits(user_id,method,amount,operation_id,status,reviewed_by,reviewed_at) VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP)',
-                          (m.from_user.id,method,amount,ref,'approved',0))
+            if method=='sham':
+                fixed=c.execute('SELECT account FROM sham_verified WHERE user_id=?',(m.from_user.id,)).fetchone()
+                if fixed and fixed['account']!=sender_account: raise PermissionError('wallet mismatch')
+                if not fixed:
+                    c.execute('INSERT INTO sham_verified(user_id,account,holder) VALUES(?,?,?)',(m.from_user.id,sender_account,sender_name))
+            cur=c.execute('INSERT INTO deposits(user_id,method,amount,operation_id,sender_account,sender_name,status,reviewed_by,reviewed_at) VALUES(?,?,?,?,?,?,?, ?,CURRENT_TIMESTAMP)',
+                          (m.from_user.id,method,amount,ref,sender_account,sender_name,'approved',0))
             did=cur.lastrowid
             bonus_row=c.execute('SELECT id,percent,kind FROM wheel_bonuses WHERE user_id=? AND used_deposit_id IS NULL AND expires_at>? ORDER BY expires_at,id LIMIT 1',(m.from_user.id,int(time.time()))).fetchone()
             bonus_amount=0; cashback=False
@@ -1151,6 +1186,9 @@ async def deposit_reference(m:Message,state:FSMContext):
                 award=c.execute('INSERT OR IGNORE INTO loyalty_deposit_awards(deposit_id,user_id,points) VALUES(?,?,?)',(did,m.from_user.id,earned_points))
                 if award.rowcount: c.execute('UPDATE users SET points=points+? WHERE id=?',(earned_points,m.from_user.id))
             c.execute('INSERT OR IGNORE INTO wheel_spins(deposit_id,user_id) VALUES(?,?)',(did,m.from_user.id))
+    except PermissionError:
+        await state.clear()
+        return await m.answer('❌ هذه العملية من عنوان شام كاش مختلف عن عنوانك المثبّت، لم يُضف أي رصيد.')
     except sqlite3.IntegrityError:
         await state.clear()
         return await m.answer('⚠️ رقم العملية مستخدم مسبقاً، ولا يمكن شحنه مرتين.')
