@@ -65,7 +65,7 @@ body{background:radial-gradient(ellipse at 50% 55%,#12507c 0%,#071c33 52%,#02081
   <button class="btn" id="spin" disabled>🎡 لف العجلة</button>
   <div class="result" id="result"></div>
 </div>
-<div class="ver">V43</div>
+<div class="ver">V47</div>
 
 <script>
 (function(){
@@ -179,8 +179,8 @@ btn.addEventListener('click',function(){
     wheel.style.transform='rotate('+rotation+'deg)';
     setTimeout(function(){
       spinning=false;
-      if(outcome==='bonus'){result.textContent='🎁 ربحت بونص 5% على إيداعك القادم، صالح لمدة 24 ساعة!';}
-      else if(outcome==='cashback'){result.textContent='💸 ربحت كاش باك 5% على مبلغ إيداعك القادم، صالح لمرة واحدة!';}
+      if(outcome==='bonus'){result.textContent='🎁 ربحت بونص 5% على إيداعك القادم، صالح لمدة 24 ساعة فقط! (وصلتك رسالة بالتفاصيل داخل البوت)';}
+      else if(outcome==='cashback'){result.textContent='💸 ربحت كاش باك 5%: عند إيداعك القادم يتفعّل التعويض، وإذا خسرت المبلغ تحصل على 5% منه. (وصلتك رسالة بالتفاصيل داخل البوت)';}
       else{result.textContent='HARDLUCK — حظ أوفر باللفة القادمة';showHard();}
       load();
     },5600);
