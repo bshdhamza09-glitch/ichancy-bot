@@ -5,6 +5,8 @@ import re
 import os, secrets
 import sqlite3
 import time
+import aiohttp
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -43,6 +45,11 @@ NO_EXPIRY_TS = 4102444800  # 2100-01-01: wheel cashback has no 24h expiry, it is
 SHAM_ACCOUNT = os.getenv('SHAM_ACCOUNT', 'bbcbfd15ad74579eb0b8e9baca872e57').strip()
 SYRIATEL_ACCOUNT = os.getenv('SYRIATEL_ACCOUNT', '0933185350').strip()
 QR = Path(__file__).with_name('sham_qr.jpg')
+API_SYRIA_KEY = os.getenv('API_SYRIA_KEY', '').strip()
+API_SYRIA_URL = 'https://apisyria.com/api/v1'
+API_SYRIA_SYRIATEL_GSM = os.getenv('API_SYRIA_SYRIATEL_GSM', SYRIATEL_ACCOUNT).strip()
+API_SYRIA_SHAM_ADDRESS = os.getenv('API_SYRIA_SHAM_ADDRESS', SHAM_ACCOUNT).strip()
+
 
 
 TERMS_V12 = 'عند الضغط على زر موافقة فأنت توافق على الشروط القائمة ضمن البوت ويحق لك الإعتراض في حال مواجهة أي مشكلة خارجة عن شروط وقوانين البوت\n\nيرجى قراءة هذه الشّروط قبل استخدام البوت لضمان تجربة آمنة وسلسة:\n\nالبوت مخصّص لإنشاء الحسابات، والسّحب، والتعبئة الفورية لحسابات موقع Ichancy.\n\n1_منع الحسابات المتعدّدة:\nإنشاء أكثر من حساب للشّخص الواحد مخالف للقوانين، وقد يؤدّي إلى حظر الحسابات المرتبطة وتجميد أرصدتها، وذلك بناءاً على سياسة اللّعب النظيف .\n\n2_تبديل طرق الدفع غير مسموح:\nلا يُسمح بشحن رصيد وسحبه بغرض التبديل بين وسائل الدفع المختلفة. في حال اكتشاف عملية كهذه، يتم سحب الرّصيد والتّحفظ عليه دون إشعار مسبق.\n\n3_شروط أرباح الإحالات:\nتُحتسب أرباح الإحالة فقط بعد تسجيل 3 إحالات نشطة أو أكثر (أي قاموا بالتعبئة الفعلية).\n\n⛔️تنبيه:\nأي محاولة للتّحايل أو مخالفة الشروط ستؤدي إلى إيقاف الحساب وتجميد الأرصدة.'
@@ -499,7 +506,7 @@ async def deposit_menu(m):
     if not active: bonus_note=''
     elif active['kind']=='cashback': bonus_note='\n💸 لديك كاش باك 5%: يتفعّل على إيداعك القادم، وإذا لم تسحب خلال أسبوع يُضاف لك التعويض تلقائياً (لمرة واحدة)'
     else: bonus_note=f'\n🎁 لديك بونص إيداع 5% متاح حتى {datetime.fromtimestamp(active["expires_at"],timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}'
-    await m.answer('💰 اختر طريقة شحن الرصيد الداخلي (مراجعة يدوية):'+bonus_note,reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+    await m.answer('💰 اختر طريقة شحن الرصيد الداخلي (تحقق تلقائي):'+bonus_note,reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='🟢 شام كاش - دولار',callback_data='dep:sham_usd'),InlineKeyboardButton(text='🟢 شام كاش - سوري',callback_data='dep:sham')],
         [InlineKeyboardButton(text='📱 سيريتل كاش',callback_data='dep:syriatel')],
         [InlineKeyboardButton(text='↩️ الرئيسية',callback_data=BUTTON_IDS['🏠 القائمة الرئيسية'])]]))
@@ -510,33 +517,22 @@ def syriatel_numbers():
 
 async def deposit_instructions(m,method,uid):
     from html import escape
-    fee=f'{fee_percent():g}%'   # withdrawal commission shown here is the admin-defined one
     if method in ('sham','sham_usd'):
         msg=('💳 شحن تلقائي عبر شام كاش\n\n'
-             'يرجى تحويل المبلغ المطلوب إلى العنوان أدناه:\n\n'
-             f'📍 العنوان:\n<code>{escape(SHAM_ACCOUNT)}</code>\n\n'
-             f'عمولة السحب {fee}\n\n'
-             '⚠️ تنبيه هام: يرجى عدم إخفاء هوية الحساب أثناء التحويل.\n\n'
-             'اقل عملية تحويل 200(syp) او 2(usd)\n'
-             '🧾 بعد التحويل: أرسل رقم العملية هنا للتحقق التلقائي.')
+             'حوّل إلى العنوان التالي:\n'
+             f'<code>{escape(SHAM_ACCOUNT)}</code>\n\n'
+             '⚠️ لا تُخفِ بيانات التحويل.\n'
+             'بعد التحويل، أرسل رقم العملية فقط للتحقق التلقائي.')
         if QR.exists():
             await m.answer_photo(FSInputFile(QR),caption='📸 رمز ShamCash للدفع')
-        kb=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text='📋 نسخ عنوان شام كاش',copy_text=CopyTextButton(text=SHAM_ACCOUNT))],
-            [InlineKeyboardButton(text='✅ أتممت التحويل',callback_data='depgo:sham_usd' if method=='sham_usd' else 'depgo:sham')]])
     else:
         nums='\n'.join(f'<code>{escape(n)}</code>' for n in syriatel_numbers())
-        msg=('💳 شحن تلقائي عبر سرياتيل كاش\n\n'
-             'ارسل الى احد الارقام التالية بطريقة التحويل اليدوي\n\n'
+        msg=('💳 شحن تلقائي عبر سيريتل كاش\n\n'
+             'حوّل إلى أحد الأرقام التالية:\n'
              f'{nums}\n\n'
-             f'عمولة السحب {fee}\n\n'
-             'اقل قيمة للشحن هي 200 ليرة سورية جديدة\n'
-             'معاملاتك المالية آمنة \n\n'
-             ' ثم ادخل رقم عملية التحويل  👇')
-        kb=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text='📋 نسخ رقم سيريتل كاش',copy_text=CopyTextButton(text=syriatel_numbers()[0]))],
-            [InlineKeyboardButton(text='✅ أتممت التحويل',callback_data='depgo:syriatel')]])
-    await m.answer(msg,reply_markup=kb,parse_mode='HTML')
+             'بعد التحويل، أرسل رقم العملية فقط للتحقق التلقائي.')
+    # No copy/transfer-completed buttons; FSM starts immediately.
+    await m.answer(msg,parse_mode='HTML')
 
 async def send_deposit_to_admins(bot,deposit_id):
     with db() as c:
@@ -577,7 +573,6 @@ def withdrawal_keyboard():
         [InlineKeyboardButton(text='🟥 سيرياتيل كاش',callback_data='wd:syriatel')],
         [InlineKeyboardButton(text='💠 شام كاش',callback_data='wd:sham_menu')],
         [InlineKeyboardButton(text='🟢 USDT',callback_data='wd:unavailable')],
-        [InlineKeyboardButton(text='💸 حوالات مالية',callback_data='wd:unavailable')],
         [InlineKeyboardButton(text='🏠 القائمة الرئيسية',callback_data=BUTTON_IDS['🏠 القائمة الرئيسية'])]])
 
 async def withdrawal_menu(m,uid):
@@ -1033,84 +1028,145 @@ async def verify_join(q:CallbackQuery):
     else: await q.answer('ما قدرنا نتحقق من الاشتراك. تأكد إنك مشترك وإن البوت أدمن بالقناة.',show_alert=True)
 
 @router.callback_query(F.data.startswith('dep:'))
-async def select_deposit(q:CallbackQuery):
-    await q.answer()
-    if not await require_join(q.bot,q.from_user.id,q.message): return
-    await deposit_instructions(q.message,q.data.split(':')[1],q.from_user.id)
-
-@router.callback_query(F.data.startswith('depgo:'))
-async def begin_deposit(q:CallbackQuery,state:FSMContext):
+async def select_deposit(q:CallbackQuery,state:FSMContext):
     await q.answer()
     if not await require_join(q.bot,q.from_user.id,q.message): return
     method=q.data.split(':')[1]
-    usd=method=='sham_usd'
-    if usd: method='sham'
-    await state.set_state(Input.deposit_amount)
-    await state.update_data(deposit_method=method,deposit_usd=usd)
-    await q.message.answer('💰 اكتب المبلغ المحوّل بالدولار (مثال: 2 أو 2.5):' if usd else '💰 اكتب المبلغ المحوّل بالليرة السورية الجديدة (رقم صحيح موجب):')
-
-@router.message(Input.deposit_amount)
-async def deposit_amount(m:Message,state:FSMContext):
-    data=await state.get_data()
-    if data.get('deposit_usd'):
-        from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-        try:
-            usd=Decimal((m.text or '').strip().replace(',','.'))
-            rate=Decimal(str(setting('dollar_rate')).replace(',',''))
-            amount=int((usd*rate).quantize(Decimal('1'),rounding=ROUND_HALF_UP))
-            if usd<=0 or amount<=0 or amount>1000000000: raise ValueError()
-        except (InvalidOperation,ValueError): return await m.answer('اكتب مبلغاً صحيحاً بالدولار (مثال: 2 أو 2.5).')
-        await m.answer(f'💱 {usd:g} USD ≈ {amount:,} ل.س (سعر الصرف {setting("dollar_rate")}).')
-    else:
-        try:
-            amount=int((m.text or '').strip())
-            if amount<=0 or amount>1000000000: raise ValueError()
-        except ValueError: return await m.answer('اكتب مبلغ صحيح موجب.')
-    await state.update_data(deposit_amount=amount)
+    if method not in ('sham','sham_usd','syriatel'): return
     await state.set_state(Input.deposit_reference)
-    await m.answer('🔢 أرسل رقم عملية التحويل الموجود في إيصال الدفع:')
+    await state.update_data(deposit_method='sham' if method.startswith('sham') else 'syriatel',
+                            deposit_usd=(method=='sham_usd'))
+    await deposit_instructions(q.message,method,q.from_user.id)
+
+@router.callback_query(F.data.startswith('depgo:'))
+async def begin_deposit(q:CallbackQuery,state:FSMContext):
+    # Legacy Telegram buttons still work, but no manual deposit workflow.
+    method=q.data.split(':',1)[1]
+    if method not in ('sham','sham_usd','syriatel'): return await q.answer()
+    await select_deposit_legacy(q,state,method)
+
+async def select_deposit_legacy(q,state,method):
+    await q.answer()
+    if not await require_join(q.bot,q.from_user.id,q.message): return
+    await state.set_state(Input.deposit_reference)
+    await state.update_data(deposit_method='sham' if method.startswith('sham') else 'syriatel',deposit_usd=method=='sham_usd')
+    await q.message.answer('🔢 أرسل رقم عملية التحويل فقط للتحقق التلقائي:')
+
+async def api_syria_find(method, reference):
+    if not API_SYRIA_KEY:
+        raise RuntimeError('API_SYRIA_KEY missing')
+    if method=='syriatel':
+        account=API_SYRIA_SYRIATEL_GSM
+        params={'resource':'syriatel','action':'find_tx','tx':reference,'gsm':account,'period':'all'}
+    else:
+        account=API_SYRIA_SHAM_ADDRESS
+        params={'resource':'shamcash','action':'find_tx','tx':reference,'account_address':account}
+    if not account: raise RuntimeError('Receiving account missing')
+    timeout=aiohttp.ClientTimeout(total=18)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(API_SYRIA_URL,params=params,headers={'X-Api-Key':API_SYRIA_KEY,'Accept':'application/json'}) as resp:
+            if resp.status!=200: raise RuntimeError(f'API Syria HTTP {resp.status}')
+            payload=await resp.json(content_type=None)
+    if not isinstance(payload,dict) or payload.get('success') is not True:
+        raise RuntimeError('API Syria unsuccessful response')
+    data=payload.get('data')
+    if not isinstance(data,dict) or type(data.get('found')) is not bool:
+        raise RuntimeError('API Syria unexpected response')
+    if not data['found']: return None
+    tx=data.get('transaction')
+    if not isinstance(tx,dict): raise RuntimeError('API Syria missing transaction')
+    return tx
+
+def validate_api_transaction(method,reference,tx,usd):
+    tx_id=str(tx.get('transaction_no' if method=='syriatel' else 'tran_id','')).strip()
+    if tx_id!=reference: raise ValueError('رقم العملية غير مطابق')
+    try:
+        amount=Decimal(str(tx.get('amount','')))
+        if not amount.is_finite() or amount<=0: raise ValueError()
+    except (InvalidOperation,ValueError): raise ValueError('قيمة العملية غير صالحة')
+    if method=='syriatel':
+        receiver=str(tx.get('to','')).strip()
+        allowed={re.sub(r'\D','',x) for x in syriatel_numbers()}
+        if not receiver or re.sub(r'\D','',receiver) not in allowed:
+            raise ValueError('الحوالة ليست واردة إلى حساب سيريتل المعتمد')
+        if amount<200: raise ValueError('أقل إيداع سيريتل 200 ليرة سورية جديدة')
+        credit=amount
+    else:
+        currency=str(tx.get('currency','')).upper().strip()
+        if currency!=('USD' if usd else 'SYP'):
+            raise ValueError('عملة الحوالة لا تطابق طريقة الشحن المختارة')
+        if amount<(Decimal('2') if usd else Decimal('200')):
+            raise ValueError('مبلغ الحوالة أقل من الحد الأدنى')
+        # ShamCash find_tx is scoped to the verified linked receiving account.
+        if usd:
+            rate=Decimal(str(setting('dollar_rate')).replace(',',''))
+            if not rate.is_finite() or rate<=0: raise ValueError('سعر الدولار غير مضبوط')
+            credit=amount*rate
+        else: credit=amount
+    rounded=credit.quantize(Decimal('1'),rounding=ROUND_HALF_UP)
+    if rounded!=credit:
+        raise ValueError('المبلغ لا يمكن تحويله بدقة إلى رصيد صحيح؛ تواصل مع الدعم')
+    if not 0<int(rounded)<=1000000000: raise ValueError('المبلغ خارج الحدود المسموحة')
+    return int(rounded)
 
 @router.message(Input.deposit_reference)
 async def deposit_reference(m:Message,state:FSMContext):
     ref=(m.text or '').strip()
-    if not 3<=len(ref)<=100: return await m.answer('أرسل رقم عملية صحيح (3 إلى 100 حرف).')
-    await state.update_data(deposit_reference=ref)
+    if not re.fullmatch(r'[0-9]{3,30}',ref):
+        return await m.answer('🔢 أرسل رقم العملية بالأرقام فقط (3 إلى 30 خانة).')
     data=await state.get_data()
-    if data['deposit_method']=='sham':
-        await state.set_state(Input.deposit_sender)
-        await m.answer('🏦 أرسل كود حساب شام كاش الذي حولت منه، ثم فاصلة | ثم الاسم الظاهر لصاحب الحساب. مثال: account123 | أحمد محمد\n⚠️ هذه البيانات تصريح منك، وستتحقق الإدارة منها في إيصال التحويل.')
-    else: await finish_deposit(m,state)
-
-@router.message(Input.deposit_sender)
-async def deposit_sender(m:Message,state:FSMContext):
-    parts=(m.text or '').split('|',1)
-    if len(parts)!=2 or not all(p.strip() for p in parts): return await m.answer('أرسل: كود حسابك | اسم صاحب الحساب')
-    if len(parts[0].strip())>150 or len(parts[1].strip())>150: return await m.answer('البيانات طويلة جداً.')
-    await state.update_data(sender_account=parts[0].strip(),sender_name=parts[1].strip())
-    await finish_deposit(m,state)
-
-async def finish_deposit(m,state):
-    data=await state.get_data()
-    await state.clear()
-    if not await require_join(m.bot,m.from_user.id,m): return
+    method=data.get('deposit_method')
+    if method not in ('sham','syriatel'): return await state.clear()
+    await m.answer('⏳ جارٍ التحقق من العملية...')
+    try:
+        tx=await api_syria_find(method,ref)
+        if tx is None: return await m.answer('❌ رقم العملية غير موجود.')
+        amount=validate_api_transaction(method,ref,tx,bool(data.get('deposit_usd')))
+    except ValueError as e:
+        return await m.answer(f'❌ لم يتم قبول العملية: {e}')
+    except Exception:
+        logging.exception('API Syria deposit verification error')
+        return await m.answer('⚠️ تعذّر التحقق حالياً، حاول لاحقاً. لم يُضف أي رصيد.')
     save(m.from_user)
+    # Atomic transaction + unique (method, operation_id) prevents double credit.
     try:
         with db() as c:
             c.execute('BEGIN IMMEDIATE')
-            bound=c.execute('SELECT account FROM sham_verified WHERE user_id=?',(m.from_user.id,)).fetchone()
-            if data['deposit_method']=='sham' and bound and bound['account']!=data.get('sender_account'):
-                raise ValueError('حساب شام كاش مختلف عن الحساب المعتمد. تواصل مع الإدارة لمراجعة الحالة؛ لم يُنشأ طلب تلقائي.')
-            cur=c.execute('INSERT INTO deposits(user_id,method,amount,operation_id,sender_account,sender_name) VALUES(?,?,?,?,?,?)',
-                          (m.from_user.id,data['deposit_method'],data['deposit_amount'],data['deposit_reference'],data.get('sender_account'),data.get('sender_name')))
+            cur=c.execute('INSERT INTO deposits(user_id,method,amount,operation_id,status,reviewed_by,reviewed_at) VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP)',
+                          (m.from_user.id,method,amount,ref,'approved',0))
             did=cur.lastrowid
-    except sqlite3.IntegrityError: return await m.answer('⚠️ رقم العملية مستخدم مسبقاً لهذه الطريقة. تواصل مع الإدارة.')
-    except ValueError as e: return await m.answer(str(e))
-    sent=await send_deposit_to_admins(m.bot,did)
-    await m.answer(f'📥 تم تسجيل طلبك رقم #{did} للمراجعة اليدوية. لن يُضاف الرصيد إلا بعد تحقق الإدارة من التحويل.' + ('' if sent else '\n⚠️ تعذر إرسال إشعار الإدارة، تواصل مع الدعم.'))
+            bonus_row=c.execute('SELECT id,percent,kind FROM wheel_bonuses WHERE user_id=? AND used_deposit_id IS NULL AND expires_at>? ORDER BY expires_at,id LIMIT 1',(m.from_user.id,int(time.time()))).fetchone()
+            bonus_amount=0; cashback=False
+            if bonus_row:
+                c.execute('UPDATE wheel_bonuses SET used_deposit_id=? WHERE id=? AND used_deposit_id IS NULL',(did,bonus_row['id']))
+                if bonus_row['kind']=='cashback':
+                    claim_amount=amount*bonus_row['percent']//100
+                    if claim_amount>0:
+                        c.execute('INSERT OR IGNORE INTO cashback_claims(user_id,deposit_id,deposit_amount,cashback_amount) VALUES(?,?,?,?)',(m.from_user.id,did,amount,claim_amount))
+                        cashback=True
+                else: bonus_amount=amount*bonus_row['percent']//100
+            new=add_local_balance(c,m.from_user.id,amount+bonus_amount,0)
+            earned_points=amount//500
+            if earned_points:
+                award=c.execute('INSERT OR IGNORE INTO loyalty_deposit_awards(deposit_id,user_id,points) VALUES(?,?,?)',(did,m.from_user.id,earned_points))
+                if award.rowcount: c.execute('UPDATE users SET points=points+? WHERE id=?',(earned_points,m.from_user.id))
+            c.execute('INSERT OR IGNORE INTO wheel_spins(deposit_id,user_id) VALUES(?,?)',(did,m.from_user.id))
+    except sqlite3.IntegrityError:
+        await state.clear()
+        return await m.answer('⚠️ رقم العملية مستخدم مسبقاً، ولا يمكن شحنه مرتين.')
+    except Exception:
+        logging.exception('Atomic automatic deposit credit failed')
+        return await m.answer('⚠️ تعذّرت إضافة الرصيد حالياً. حاول لاحقاً، ولم تُحتسب العملية.')
+    await state.clear()
+    msg=f'✅ تم التحقق من العملية وإضافة {amount:,} ل.س إلى رصيدك.\n💰 رصيدك الحالي: {new:,} ل.س'
+    if bonus_amount: msg+=f'\n🎁 بونص الإيداع: +{bonus_amount:,} ل.س'
+    if cashback: msg+='\n💸 تم تفعيل الكاش باك وفق شروطه.'
+    if earned_points: msg+=f'\n🌟 نقاط ولاء مكتسبة: {earned_points}'
+    await m.answer(msg)
 
 @router.callback_query(F.data.startswith('dreview:'))
 async def review_deposit(q:CallbackQuery):
-    if not admin(q.from_user): return await q.answer('غير مصرح',show_alert=True)
+    return await q.answer('المراجعة اليدوية للإيداعات معطّلة؛ الإيداع عبر التحقق التلقائي فقط.',show_alert=True)
     _,sid,action=q.data.split(':')
     did=int(sid)
     with db() as c:
