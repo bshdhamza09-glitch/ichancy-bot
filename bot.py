@@ -83,6 +83,7 @@ USER_ADMIN_ROWS = [
     ['↩️ رجوع للوحة الأدمن'],
 ]
 BONUS_ADMIN_ROWS = [
+    ['🎁 إضافة أو حذف البونص'],
     ['📝 تعديل نص العروض والبونصات'],
     ['↩️ رجوع للوحة الأدمن'],
 ]
@@ -92,7 +93,7 @@ LOYALTY_ADMIN_ROWS = [
     ['↩️ رجوع للوحة الأدمن'],
 ]
 SETTINGS_ADMIN_ROWS = [
-    ['⚙️ حالة البوت (تشغيل/إيقاف)'],
+    ['🛠️ وضع الصيانة'],
     [FEES_LABEL],
     ['⚙️ تعديل سعر الدولار', '🔥 حرق رقم عملية'],
     ['📝 إدارة المحتوى والروابط'],
@@ -129,6 +130,7 @@ class Input(StatesGroup):
     unban = State()
     broadcast = State()
     bonus_text = State()
+    deposit_promo_percent = State()
     support = State()
     support_confirm = State()
     balance_change = State()
@@ -254,6 +256,7 @@ def init():
         if 'bot_balance' not in cols: c.execute('ALTER TABLE users ADD COLUMN bot_balance INTEGER NOT NULL DEFAULT 0')
         MIGRATION_REPORT=revert_redenomination(c,backup_path)  # restores the zeros if V45 had removed them
         c.execute("INSERT OR IGNORE INTO settings VALUES ('enabled','1')")
+        c.execute("INSERT OR IGNORE INTO settings VALUES ('deposit_promo_percent','0')")
         c.execute("INSERT OR IGNORE INTO settings VALUES ('bonuses','لا توجد عروض حالية')")
         # Apply this requested default once, without overwriting later admin edits.
         if not c.execute("SELECT 1 FROM settings WHERE key='bonuses_v20_applied'").fetchone():
@@ -507,7 +510,9 @@ async def deposit_menu(m):
     if not active: bonus_note=''
     elif active['kind']=='cashback': bonus_note=''  # keep cashback benefit, hide this menu message
     else: bonus_note=f'\n🎁 لديك بونص إيداع 5% متاح حتى {datetime.fromtimestamp(active["expires_at"],timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}'
-    await m.answer('💰 اختر طريقة شحن الرصيد الداخلي (تحقق تلقائي):'+bonus_note,reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+    promo=int(setting('deposit_promo_percent') or '0')
+    promo_note=f'\n🎁 عرض إيداع فعّال: بونص {promo}% على الإيداعات الجديدة!' if promo>0 else ''
+    await m.answer('💰 اختر طريقة شحن الرصيد الداخلي (تحقق تلقائي):'+promo_note+bonus_note,reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='🟢 شام كاش - دولار',callback_data='dep:sham_usd'),InlineKeyboardButton(text='🟢 شام كاش - سوري',callback_data='dep:sham')],
         [InlineKeyboardButton(text='📱 سيريتل كاش',callback_data='dep:syriatel')],
         [InlineKeyboardButton(text='↩️ الرئيسية',callback_data=BUTTON_IDS['🏠 القائمة الرئيسية'])]]))
@@ -664,7 +669,7 @@ ADMIN_REPLY_ROWS = [
     ['اضافة او حذف البونص'],
     ['الإذاعة'],
     ['تعديل اكواد سيرياتيل كاش', 'تعديل اكواد شام كاش'],
-    ['⚙️ حالة البوت (تشغيل/إيقاف)'],
+    ['🛠️ وضع الصيانة'],
     ['⚙️ تعديل سعر الدولار'],
     ['🔥 حرق رقم عملية'],
     ['الكاش باك الأسبوعي 10%'],
@@ -706,7 +711,7 @@ async def admin_reply_dispatch(m:Message,state:FSMContext):
         return await m.answer(f"{'➕ إضافة رصيد' if t.startswith('➕') else '➖ خصم رصيد'} (رصيد البوت الداخلي)\nأرسل آيدي المستخدم ثم المبلغ في رسالة واحدة:\n<code>123456789 5000</code>\nللإلغاء اضغط أي زر من اللوحة أو أرسل /cancel",parse_mode='HTML')
     if t=='تعديل نص البونصات و العروض الحالية': return await bonus_start(m,state)
     if t=='الإذاعة': return await broadcast_start(m,state)
-    if t=='⚙️ حالة البوت (تشغيل/إيقاف)': return await toggle(m)
+    if t in ('⚙️ حالة البوت (تشغيل/إيقاف)','🛠️ وضع الصيانة'): return await maintenance_menu(m)
     if t in ('🚫 حظر مستخدم','🔓 فك حظر مستخدم'): return await ban_start(m,state)
     if t=='القائمة الرئيسية':
         await m.answer('🏠 تم الخروج من لوحة الإدارة.',reply_markup=ReplyKeyboardRemove())
@@ -1180,7 +1185,9 @@ async def deposit_reference(m:Message,state:FSMContext):
                         c.execute('INSERT OR IGNORE INTO cashback_claims(user_id,deposit_id,deposit_amount,cashback_amount) VALUES(?,?,?,?)',(m.from_user.id,did,amount,claim_amount))
                         cashback=True
                 else: bonus_amount=amount*bonus_row['percent']//100
-            new=add_local_balance(c,m.from_user.id,amount+bonus_amount,0)
+            promo_percent=int(c.execute("SELECT value FROM settings WHERE key='deposit_promo_percent'").fetchone()[0])
+            promo_amount=amount*promo_percent//100
+            new=add_local_balance(c,m.from_user.id,amount+bonus_amount+promo_amount,0)
             earned_points=amount//500
             if earned_points:
                 award=c.execute('INSERT OR IGNORE INTO loyalty_deposit_awards(deposit_id,user_id,points) VALUES(?,?,?)',(did,m.from_user.id,earned_points))
@@ -1197,7 +1204,8 @@ async def deposit_reference(m:Message,state:FSMContext):
         return await m.answer('⚠️ تعذّرت إضافة الرصيد حالياً. حاول لاحقاً، ولم تُحتسب العملية.')
     await state.clear()
     msg=f'✅ تم التحقق من العملية وإضافة {amount:,} ل.س إلى رصيدك.\n💰 رصيدك الحالي: {new:,} ل.س'
-    if bonus_amount: msg+=f'\n🎁 بونص الإيداع: +{bonus_amount:,} ل.س'
+    if bonus_amount: msg+=f'\n🎁 بونص العجلة: +{bonus_amount:,} ل.س'
+    if promo_amount: msg+=f'\n🎁 بونص العرض {promo_percent}%: +{promo_amount:,} ل.س'
     if cashback: msg+='\n💸 تم تفعيل الكاش باك وفق شروطه.'
     if earned_points: msg+=f'\n🌟 نقاط ولاء مكتسبة: {earned_points}'
     await m.answer(msg)
@@ -1229,7 +1237,9 @@ async def review_deposit(q:CallbackQuery):
                     if claim_amount>0: claim_id=c.execute('INSERT OR IGNORE INTO cashback_claims(user_id,deposit_id,deposit_amount,cashback_amount) VALUES(?,?,?,?)',(r['user_id'],did,r['amount'],claim_amount)).lastrowid
                 else:
                     bonus_amount=r['amount']*bonus_row['percent']//100
-            new=add_local_balance(c,r['user_id'],r['amount']+bonus_amount,q.from_user.id)
+            promo_percent=int(c.execute("SELECT value FROM settings WHERE key='deposit_promo_percent'").fetchone()[0])
+            promo_amount=r['amount']*promo_percent//100
+            new=add_local_balance(c,r['user_id'],r['amount']+bonus_amount+promo_amount,q.from_user.id)
             earned_points = r['amount'] // 500
             if earned_points > 0:
                 award = c.execute('INSERT OR IGNORE INTO loyalty_deposit_awards(deposit_id,user_id,points) VALUES(?,?,?)', (did,r['user_id'],earned_points))
@@ -1315,7 +1325,8 @@ async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
         '🔎 البحث عن مستخدم': lambda: lookup_start(m, state),
         '🚫 حظر مستخدم': lambda: ban_start(m, state),
         '🔓 فك حظر مستخدم': lambda: ban_start(m, state),
-        '⚙️ حالة البوت (تشغيل/إيقاف)': lambda: toggle(m),
+        '⚙️ حالة البوت (تشغيل/إيقاف)': lambda: maintenance_menu(m),
+        '🛠️ وضع الصيانة': lambda: maintenance_menu(m),
         '📝 تعديل نص البونصات والعروض الحالية': lambda: bonus_start(m, state),
         '📢 الإذاعة': lambda: broadcast_start(m, state),
         '📝 رسالة للأدمن': lambda: support_start(m, state),
@@ -1592,13 +1603,62 @@ async def ban_finish(m:Message,state:FSMContext):
     await state.clear()
     await m.answer('✅ تم تحديث حالة المستخدم.')
 
-@router.message(F.text == '⚙️ حالة البوت (تشغيل/إيقاف)')
-async def toggle(m:Message):
+def maintenance_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='🔴 تفعيل وضع الصيانة',callback_data='maintenance:off')],
+        [InlineKeyboardButton(text='🟢 تشغيل البوت',callback_data='maintenance:on')]])
+
+async def maintenance_menu(m):
     if not admin(m.from_user): return
-    v='0' if setting('enabled')=='1' else '1'
-    with db() as c: c.execute("UPDATE settings SET value=? WHERE key='enabled'",(v,))
-    audit(m.from_user.id,'bot_enabled',v)
-    await m.answer('🟢 تم تشغيل البوت — المستخدمون يستطيعون استخدامه الآن.' if v=='1' else '⏸️ تم إيقاف البوت — المستخدمون لا يستطيعون استخدامه (الأدمن يعمل).')
+    status='🟢 البوت يعمل' if setting('enabled')=='1' else '🔴 وضع الصيانة مفعّل'
+    await m.answer('🛠️ وضع الصيانة\nالحالة الحالية: '+status,reply_markup=maintenance_keyboard())
+
+@router.message(F.text.in_({'🛠️ وضع الصيانة','⚙️ حالة البوت (تشغيل/إيقاف)'}))
+async def toggle(m:Message):
+    return await maintenance_menu(m)
+
+@router.callback_query(F.data.in_({'maintenance:off','maintenance:on'}))
+async def maintenance_switch(q:CallbackQuery):
+    if not admin(q.from_user): return await q.answer('غير مصرح',show_alert=True)
+    v='1' if q.data.endswith(':on') else '0'
+    with db() as c:
+        c.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',('enabled',v))
+    audit(q.from_user.id,'bot_enabled',v)
+    await q.answer('تم حفظ الحالة')
+    await q.message.edit_text('🛠️ وضع الصيانة\nالحالة الحالية: '+('🟢 البوت يعمل' if v=='1' else '🔴 وضع الصيانة مفعّل'),reply_markup=maintenance_keyboard())
+
+async def promo_menu(m):
+    if not admin(m.from_user): return
+    rate=setting('deposit_promo_percent') or '0'
+    await m.answer(f'🎁 بونص الإيداع العام\nالنسبة الحالية: {rate}%\nيطبّق على الإيداعات الجديدة المؤكدة فقط.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='➕ إضافة أو تعديل نسبة البونص',callback_data='promo:set')],
+        [InlineKeyboardButton(text='🗑️ حذف البونص',callback_data='promo:remove')]]))
+
+@router.message(F.text.in_({'اضافة او حذف البونص','🎁 إضافة أو حذف البونص'}))
+async def promo_open(m:Message):
+    return await promo_menu(m)
+
+@router.callback_query(F.data.in_({'promo:set','promo:remove'}))
+async def promo_action(q:CallbackQuery,state:FSMContext):
+    if not admin(q.from_user): return await q.answer('غير مصرح',show_alert=True)
+    await q.answer()
+    if q.data=='promo:remove':
+        with db() as c: c.execute("INSERT INTO settings(key,value) VALUES('deposit_promo_percent','0') ON CONFLICT(key) DO UPDATE SET value='0'")
+        audit(q.from_user.id,'deposit_promo_removed')
+        await state.clear()
+        return await q.message.answer('✅ تم إلغاء بونص الإيداع وإزالة إعلانه من الشحن.')
+    await state.set_state(Input.deposit_promo_percent)
+    await q.message.answer('أرسل نسبة بونص الإيداع من 1 إلى 100 (مثلاً 10).')
+
+@router.message(Input.deposit_promo_percent)
+async def promo_save(m:Message,state:FSMContext):
+    if not admin(m.from_user): return
+    value=(m.text or '').strip()
+    if not value.isdigit() or not 1<=int(value)<=100: return await m.answer('❌ أرسل نسبة صحيحة من 1 إلى 100.')
+    with db() as c: c.execute("INSERT INTO settings(key,value) VALUES('deposit_promo_percent',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(value,))
+    audit(m.from_user.id,'deposit_promo_set',value)
+    await state.clear()
+    await m.answer(f'✅ تم تفعيل بونص الإيداع بنسبة {value}%، وسيظهر في شحن الرصيد.')
 
 @router.message(F.text.in_({'📝 تعديل نص البونصات والعروض الحالية', '📝 تعديل نص العروض والبونصات'}))
 async def bonus_start(m:Message,state:FSMContext):
@@ -2126,7 +2186,7 @@ ADMIN_ACTIONS={
  '💳 تعديل أكواد شام كاش':('sham_codes','أرسل نص أكواد شام كاش.'),
  '💳 تعديل أكواد سيريتل كاش':('syriatel_codes','أرسل نص أكواد سيريتل كاش.'),
  '🎁 إدارة الجائزة الحالية':('current_prize','أرسل وصف الجائزة الحالية.'),
- '🎁 إضافة أو حذف البونص':('bonuses','أرسل نص البونصات الجديد.'),
+
  '📝 تعديل نص البونصات والعروض الحالية':('bonuses','أرسل نص البونصات الجديد.'),
  '📝 تعديل نص العروض والبونصات':('bonuses','أرسل نص العروض والبونصات الجديد.'),
  '🔥 حرق رقم عملية':('burned_operation','أرسل رقم العملية للتسجيل الإداري فقط (لا يؤثر على Ichancy).'),
@@ -2150,6 +2210,7 @@ async def admin_action(message,state,user,action):
         await state.set_state(Input.admin_config)
         await state.update_data(config_key=key)
         return await message.answer('✏️ '+(CONFIG_NAMES[key][0]+'\n'+CONFIG_NAMES[key][1] if key in CONFIG_NAMES else f'أرسل القيمة الجديدة لـ {key}.')+'\nللإلغاء أرسل /cancel')
+    if action=='🎁 إضافة أو حذف البونص': return await promo_menu(message)
     if action in ADMIN_ACTIONS:
         key,prompt=ADMIN_ACTIONS[action]
         await state.set_state(Input.admin_config)
@@ -2173,11 +2234,7 @@ async def admin_action(message,state,user,action):
     if action=='➕ إضافة رصيد' or action=='➖ خصم رصيد' or action in ('🚫 حظر مستخدم','🔓 فك حظر مستخدم'):
         return await message.answer('اختر المستخدم أولاً من 👥 المستخدمين، ثم نفّذ العملية من ملفه.')
 
-    if action=='⚙️ حالة البوت (تشغيل/إيقاف)':
-        v='0' if setting('enabled')=='1' else '1'
-        with db() as c: c.execute("UPDATE settings SET value=? WHERE key='enabled'",(v,))
-        audit(user.id,'bot_enabled',v)
-        return await message.answer('🟢 تم تشغيل البوت — المستخدمون يستطيعون استخدامه الآن.' if v=='1' else '⏸️ تم إيقاف البوت — المستخدمون لا يستطيعون استخدامه (الأدمن يعمل).')
+    if action in ('⚙️ حالة البوت (تشغيل/إيقاف)','🛠️ وضع الصيانة'): return await maintenance_menu(message)
     if action=='🌟 إدارة نقاط الولاء': return await message.answer('🌟 لوحة الولاء',reply_markup=keyboard(LOYALTY_ADMIN_ROWS))
     if action=='➕ منح نقاط ولاء': return await add_start(message,state)
     if action=='➖ خصم نقاط ولاء': return await subtract_points_start(message,state)
@@ -2300,8 +2357,12 @@ async def fallback(m:Message):
 
 class MembershipMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
-        if isinstance(event, Message) and event.from_user and not admin(event.from_user):
-            if not (event.text or '').startswith('/start'):
+        if isinstance(event, (Message,CallbackQuery)) and event.from_user and not admin(event.from_user):
+            if setting('enabled')!='1':
+                if isinstance(event,CallbackQuery): await event.answer('🛠️ البوت في وضع الصيانة حالياً.',show_alert=True)
+                else: await event.answer('🛠️ البوت في وضع الصيانة حالياً. حاول لاحقاً.')
+                return None
+            if isinstance(event, Message) and not (event.text or '').startswith('/start'):
                 if not await require_join(data['bot'],event.from_user.id,event): return None
         return await handler(event,data)
 
@@ -2322,6 +2383,7 @@ async def main():
     ], scope=BotCommandScopeDefault())
     dp=Dispatcher()
     router.message.middleware(MembershipMiddleware())
+    router.callback_query.middleware(MembershipMiddleware())
     dp.include_router(router)
     from wheel_server import serve
     runner=await serve()
