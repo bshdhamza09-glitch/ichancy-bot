@@ -1364,7 +1364,9 @@ async def click_button(q: CallbackQuery, state: FSMContext, bot: Bot):
     if label=='💸 نظام الإحالات': return await referral_screen(q.message,bot,q.from_user.id)
     if label=='💸 شحن رصيد البوت': return await deposit_menu(q.message)
     if label=='💰 سحب رصيد البوت': return await withdrawal_menu(q.message,q.from_user.id)
-    if label=='🟥 Ichancy': return await q.message.answer('خدمة Ichancy قيد الربط بالـ API الرسمي.')
+    if label=='🟥 Ichancy':
+        from ichancy_handlers import say_menu
+        return await say_menu(q.message,state)
     if label in ALL:
         return await services(m, bot)
 
@@ -1965,7 +1967,9 @@ async def services(m:Message,bot:Bot,state:FSMContext=None):
         if m.text=='🎁 كود هدية': return await gift_start(m,state)
         if m.text=='📝 رسالة للأدمن': return await support_start(m,state)
     if m.text==REFUND_LABEL: return await refund_last_withdrawal(m,bot,m.from_user)
-    if m.text=='🟥 Ichancy': return await m.answer('خدمات Ichancy الخارجية غير متصلة حالياً؛ بانتظار الربط الرسمي.')
+    if m.text=='🟥 Ichancy':
+        from ichancy_handlers import say_menu
+        return await say_menu(m,state)
     if m.text=='⚠️ الشروحات': return await m.answer('📚 الشروحات',reply_markup=tutorials_keyboard())
     if m.text=='💸 شحن رصيد البوت': return await deposit_menu(m)
     if m.text=='💰 سحب رصيد البوت': return await withdrawal_menu(m,m.from_user.id)
