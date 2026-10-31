@@ -1,9 +1,9 @@
 """Ichancy official API flows; one-shot financial operations with durable reconciliation."""
-import os,re,secrets,sqlite3,asyncio
+import os,re,secrets,sqlite3,asyncio,logging
 from decimal import Decimal,InvalidOperation
 from aiogram import Router,F
 from aiogram.filters import Command
-from aiogram.types import Message,CallbackQuery,ReplyKeyboardMarkup,KeyboardButton,InlineKeyboardMarkup,InlineKeyboardButton
+from aiogram.types import Message,CallbackQuery,ReplyKeyboardMarkup,KeyboardButton,ReplyKeyboardRemove,InlineKeyboardMarkup,InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup,State
 from ichancy_api import client,IchancyError
@@ -11,7 +11,43 @@ router=Router()
 class Form(StatesGroup):
     name=State(); account=State(); amount=State()
 MENU=['🆕 إنشاء حساب جديد','💳 شحن حساب','💸 سحب من حساب','💰 شحن كامل الرصيد','📤 سحب كامل الرصيد','🎰 ألعاب Ichancy','🌐 دخول إيشانسي','🏠 القائمة الرئيسية']
-def kb():return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=x) for x in MENU[i:i+2]] for i in range(0,len(MENU),2)],resize_keyboard=True)
+def kb():
+    # Inline controls stay attached to the message, not the Telegram input bar.
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=MENU[i],callback_data=f'ichmenu:{i}'),
+         InlineKeyboardButton(text=MENU[i+1],callback_data=f'ichmenu:{i+1}')]
+        for i in range(0,len(MENU),2)
+    ])
+async def show_menu(m,state):
+    await state.clear()
+    # Remove the old reply keyboard left behind by previous versions.
+    await m.answer('تم تحديث لوحة Ichancy.',reply_markup=ReplyKeyboardRemove())
+    await m.answer('🟥 خدمات Ichancy — جميع المبالغ بالليرة السورية الجديدة NSP.\nاختر الخدمة من الأزرار أدناه:',reply_markup=kb())
+@router.message(Command('cancel','start'))
+async def global_commands(m:Message,state:FSMContext):
+    await state.clear()
+    if (m.text or '').split()[0].lower()=='/start':
+        from bot import start
+        return await start(m,state)
+    await m.answer('✅ تم إلغاء العملية.',reply_markup=kb())
+@router.message(F.text=='🏠 القائمة الرئيسية')
+async def go_home(m:Message,state:FSMContext):
+    await state.clear()
+    from bot import home
+    await home(m,True)
+@router.callback_query(F.data.startswith('ichmenu:'))
+async def menu_click(q:CallbackQuery,state:FSMContext):
+    try: index=int(q.data.split(':')[1])
+    except (ValueError,IndexError):return await q.answer('زر غير صالح',show_alert=True)
+    if not 0<=index<len(MENU):return await q.answer('زر غير صالح',show_alert=True)
+    await q.answer()
+    if index==0:return await begin(q.message,state)
+    if 1<=index<=4:return await start_transfer(q.message,state,MODES[MENU[index]])
+    if index==5:return await games(q.message)
+    if index==6:return await site(q.message)
+    await state.clear()
+    from bot import home
+    await home(q.message,True)
 def db():
     from bot import DB
     c=sqlite3.connect(str(DB),timeout=30,isolation_level=None);c.row_factory=sqlite3.Row;c.execute('PRAGMA busy_timeout=30000')
@@ -19,7 +55,7 @@ def db():
     c.execute("CREATE TABLE IF NOT EXISTS ichancy_operations (id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id INTEGER NOT NULL, login TEXT NOT NULL, player_id TEXT NOT NULL, kind TEXT NOT NULL, amount INTEGER NOT NULL, status TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
     return c
 async def say_menu(m,state):
-    await state.clear();await m.answer('🟥 خدمات Ichancy — جميع المبالغ بالليرة السورية الجديدة NSP.',reply_markup=kb())
+    await show_menu(m,state)
 @router.message(F.text=='🟥 Ichancy')
 async def menu(m:Message,state:FSMContext):await say_menu(m,state)
 @router.callback_query(F.data=='ichancy_menu')
@@ -27,28 +63,37 @@ async def inline_menu(q:CallbackQuery,state:FSMContext):
     await q.answer();await say_menu(q.message,state)
 @router.message(F.text=='🆕 إنشاء حساب جديد')
 async def begin(m:Message,state:FSMContext):
-    await state.set_state(Form.name);await m.answer('أدخل اسم حساب Ichancy المطلوب (إنكليزي وأرقام):')
+    await state.clear();await state.set_state(Form.name);await m.answer('أدخل اسم حساب Ichancy المطلوب (إنكليزي وأرقام):\nللإلغاء اضغط الزر أدناه.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ إلغاء',callback_data='ichancy_menu')]]))
 @router.message(Form.name)
 async def register(m:Message,state:FSMContext):
     name=(m.text or '').strip().lower()
+    if name.startswith('/') or name in [x.lower() for x in MENU]:
+        return await m.answer('استخدم /cancel للإلغاء أو اختر خدمة من القائمة.',reply_markup=kb())
     if not re.fullmatch('[a-z][a-z0-9_]{2,18}',name):return await m.answer('الاسم لازم يبدأ بحرف إنكليزي، من 3 إلى 19 حرفاً/رقماً.')
     login=f'{name}_{secrets.randbelow(900000)+100000}';email=f'{login}@saw.com';password=secrets.token_urlsafe(16)+'A1!'
-    await m.answer('⏳ جاري إنشاء الحساب...')
+    progress=await m.answer('⏳ جاري إنشاء الحساب...')
     try:
-        result=await client.register(login,email,password)
+        result=await asyncio.wait_for(client.register(login,email,password),timeout=65)
         if str(result)!='1':raise IchancyError('لم يتم تأكيد إنشاء الحساب من الخادم')
         with db() as c:c.execute('INSERT INTO ichancy_accounts(telegram_id,login) VALUES(?,?)',(m.from_user.id,login))
-        await m.answer(f'✅ تم إنشاء الحساب\nالدخول: {login}\nالإيميل: {email}\nكلمة السر: {password}\nاحفظ كلمة السر بمكان آمن.',reply_markup=kb())
-    except (IchancyError,sqlite3.Error) as e:await m.answer(f'⚠️ لم تكتمل العملية بشكل مؤكد: {e}',reply_markup=kb())
+        await progress.edit_text(f'✅ تم إنشاء الحساب\nالدخول: {login}\nالإيميل: {email}\nكلمة السر: {password}\nاحفظ كلمة السر بمكان آمن.',reply_markup=kb())
+    except (IchancyError,sqlite3.Error,asyncio.TimeoutError) as e:
+        await progress.edit_text(f'⚠️ لم يتم تأكيد إنشاء الحساب: {e}\nلا تعيد المحاولة بنفس الاسم قبل التحقق من وجود الحساب.',reply_markup=kb())
+    except Exception:
+        logging.exception('Ichancy registration unexpected failure')
+        await progress.edit_text('❌ حدث خطأ تقني أثناء إنشاء الحساب. لم يتم تأكيد العملية. راجع سجلات Railway قبل إعادة المحاولة.',reply_markup=kb())
     finally:await state.clear()
 MODES={'💳 شحن حساب':'deposit','💸 سحب من حساب':'withdraw','💰 شحن كامل الرصيد':'deposit_all','📤 سحب كامل الرصيد':'withdraw_all'}
 @router.message(F.text.in_(set(MODES)))
+async def start_transfer(m,state,mode):
+    await state.clear();await state.update_data(mode=mode);await state.set_state(Form.account)
+    await m.answer('أرسل اسم حساب Ichancy (login) الذي تريد التعامل معه:',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ إلغاء',callback_data='ichancy_menu')]]))
 async def transfer_start(m:Message,state:FSMContext):
-    await state.clear();await state.update_data(mode=MODES[m.text]);await state.set_state(Form.account)
-    await m.answer('أرسل اسم حساب Ichancy (login) الذي تريد التعامل معه:')
+    await start_transfer(m,state,MODES[m.text])
 @router.message(Form.account)
 async def account(m:Message,state:FSMContext):
     login=(m.text or '').strip()
+    if login.startswith('/') or login in MENU:return await m.answer('اضغط إلغاء أو أرسل اسم الحساب.',reply_markup=kb())
     if not re.fullmatch(r'[a-zA-Z][a-zA-Z0-9_]{2,40}',login):return await m.answer('أدخل اسم حساب صحيح.')
     d=await state.get_data();mode=d['mode']
     try:

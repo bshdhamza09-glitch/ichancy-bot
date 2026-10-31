@@ -32,7 +32,7 @@ class Client:
                         msg='; '.join(str(n.get('content','')) for n in body.get('notification',[]) if isinstance(n,dict))
                         raise IchancyError(msg or 'رفض الخادم الطلب')
                     return body.get('result')
-        except (aiohttp.ClientError,asyncio.TimeoutError) as e:raise IchancyError('تعذر تأكيد العملية من الخادم؛ لا تعيد إرسال طلب مالي تلقائياً') from e
+        except (aiohttp.ClientError,asyncio.TimeoutError,ValueError) as e:raise IchancyError('تعذر تأكيد العملية من الخادم؛ لا تعيد إرسال طلب مالي تلقائياً') from e
     async def auth(self,force=False):
         async with self.lock:
             if self.access and self.expires>time.time()+60 and not force:return self.access
