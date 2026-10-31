@@ -106,10 +106,21 @@ class Client:
                         raise IchancyError(f'API يعيد HTTP {status} عند {endpoint}؛ تحقق من عنوان الخادم')
                     if 'json' not in content_type.lower():
                         if status == 403:
-                            logging.warning('Ichancy forbidden endpoint=%s cf_ray=%s', endpoint, ray or '-')
+                            # A CF-Ray header alone does not prove a Cloudflare WAF block:
+                            # the origin can send 403 through Cloudflare as well.
+                            sample = (await response.content.read(2048)).decode('utf-8', errors='replace').lower()
+                            challenged = (response.headers.get('cf-mitigated', '').lower() == 'challenge'
+                                          or 'challenge-platform' in sample
+                                          or 'just a moment' in sample
+                                          or 'attention required' in sample)
+                            origin = 'Cloudflare challenge' if challenged else 'server/origin or Cloudflare rule'
+                            logging.warning('Ichancy HTTP 403 endpoint=%s source=%s cf_ray=%s',
+                                            endpoint, origin, ray or '-')
                             raise IchancyForbidden(f'Ichancy يرفض الاتصال HTTP 403 عند {endpoint}'
                                 + (f' (CF-Ray: {ray})' if ray else '')
-                                + '؛ الطلب مرفوض على مستوى السيرفر/Cloudflare، وتجديد التوكن لا يصلحه.')
+                                + ('؛ يوجد تحدي Cloudflare للطلبات غير التفاعلية.' if challenged else
+                                   '؛ غير معروف إن كان الرفض من Cloudflare أم من الخادم الأصلي.')
+                                + ' تجديد التوكن لا يحل رفض signin قبل إصدار توكن.')
                         raise IchancyError(f'Ichancy رد HTTP {status} ليس JSON عند {endpoint} ({content_type[:65]})')
                     try:
                         body = await response.json(content_type=None)
@@ -120,8 +131,18 @@ class Client:
                     notices = body.get('notification') or []
                     detail = '; '.join(str(x.get('content', ''))[:140] for x in notices if isinstance(x, dict))[:260]
                     result = body.get('result')
-                    if status == 401 or (endpoint == 'refreshToken' and ('expired refresh token' in detail.lower() or 'invalid refresh token' in detail.lower())):
-                        raise IchancyAuthExpired(f'جلسة Ichancy منتهية عند {endpoint}')
+                    # The official 2026 documentation shows HTTP 201 + result='ex'
+                    # for an expired access token, not only HTTP 401.
+                    # Distinguish that from HTTP 201 sign-in errors, which are NOT
+                    # evidence an access token expired.
+                    expired_access = (endpoint not in ('signin', 'refreshToken') and
+                                      (status in (201, 401) and
+                                       (result == 'ex' or status == 401)))
+                    expired_refresh = (endpoint == 'refreshToken' and
+                                       (status == 401 or any(t in detail.lower() for t in (
+                                           'expired refresh token', 'invalid refresh token'))))
+                    if expired_access or expired_refresh:
+                        raise IchancyAuthExpired(f'جلسة Ichancy منتهية عند {endpoint} (HTTP {status})')
                     if status >= 400 or body.get('status') is False or result is False or result is None:
                         raise IchancyError(f'{endpoint}: HTTP {status}: {detail or "رفض الخادم الطلب"}')
                     return result
