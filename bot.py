@@ -2436,6 +2436,9 @@ async def main():
     router.message.middleware(MembershipMiddleware())
     router.callback_query.middleware(MembershipMiddleware())
     from ichancy_handlers import router as ichancy_router
+    # Apply the same maintenance/membership guard to both routers.
+    ichancy_router.message.middleware(MembershipMiddleware())
+    ichancy_router.callback_query.middleware(MembershipMiddleware())
     dp.include_router(ichancy_router)
     dp.include_router(router)
     from wheel_server import serve

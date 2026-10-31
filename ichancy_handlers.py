@@ -6,7 +6,7 @@ from aiogram.filters import Command
 from aiogram.types import Message,CallbackQuery,ReplyKeyboardMarkup,KeyboardButton,ReplyKeyboardRemove,InlineKeyboardMarkup,InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup,State
-from ichancy_api import client,IchancyError
+from ichancy_api import client,IchancyError,IchancyForbidden
 router=Router()
 class Form(StatesGroup):
     name=State(); account=State(); amount=State()
@@ -69,8 +69,13 @@ async def begin(m:Message,state:FSMContext):
     try:
         await asyncio.wait_for(client.call('getAgentAllWallets',{}),timeout=48)
     except (IchancyError,asyncio.TimeoutError) as exc:
-        await m.answer('⚠️ إنشاء الحسابات متوقف حالياً بسبب رفض اتصال الـAPI.\n'
-                       +str(exc)+'\nلم يتم إرسال طلب إنشاء حساب. جرّب بعد معالجة الاتصال.',reply_markup=kb())
+        logging.warning('Ichancy registration preflight failed: %s', type(exc).__name__)
+        await m.answer('⚠️ تعذّر الاتصال الرسمي بـ Ichancy حالياً؛ لم يُرسَل طلب إنشاء حساب.\n'
+                       'إنشاء الحسابات آلي فقط من خلال الـAPI، ولا تُرسل أي طلبات إنشاء للأدمن.\n'
+                       'إذا استمر HTTP 403 من Cloudflare فلا يستطيع البوت إنشاء الحساب حتى يسمح الخادم بالاتصال.',
+                       reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                           [InlineKeyboardButton(text='🔄 إعادة فحص الاتصال',callback_data='ichancy_retry_register')],
+                           [InlineKeyboardButton(text='⬅️ رجوع لقائمة Ichancy',callback_data='ichancy_menu')]]))
         return
     await state.set_state(Form.name)
     await m.answer('أدخل اسم حساب Ichancy المطلوب (إنكليزي وأرقام):\nللإلغاء اضغط الزر أدناه.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ إلغاء',callback_data='ichancy_menu')]]))
@@ -93,6 +98,19 @@ async def register(m:Message,state:FSMContext):
         logging.exception('Ichancy registration unexpected failure')
         await progress.edit_text('❌ حدث خطأ تقني أثناء إنشاء الحساب. لم يتم تأكيد العملية. راجع سجلات Railway قبل إعادة المحاولة.',reply_markup=kb())
     finally:await state.clear()
+
+# Stale buttons from V60 must not create or notify any manual/admin requests.
+@router.callback_query(F.data.startswith('ichmanual:'))
+async def reject_legacy_manual_callback(q:CallbackQuery,state:FSMContext):
+    await state.clear()
+    await q.answer('تم إلغاء الطلب اليدوي؛ إنشاء الحسابات أصبح آلياً فقط.',show_alert=True)
+    await q.message.answer('🟥 خدمات Ichancy: إنشاء الحساب آلي فقط من خلال الـAPI.',reply_markup=kb())
+
+@router.callback_query(F.data=='ichancy_retry_register')
+async def retry_register(q:CallbackQuery,state:FSMContext):
+    await q.answer()
+    await begin(q.message,state)
+
 MODES={'💳 شحن حساب':'deposit','💸 سحب من حساب':'withdraw','💰 شحن كامل الرصيد':'deposit_all','📤 سحب كامل الرصيد':'withdraw_all'}
 async def start_transfer(m,state,mode):
     await state.clear();await state.update_data(mode=mode);await state.set_state(Form.account)
@@ -177,7 +195,7 @@ async def confirm(q:CallbackQuery):
         if not isinstance(result,dict) or result.get('currencyCode')!='NSP':raise IchancyError('النتيجة غير مؤكدة؛ تحتاج مراجعة يدوية')
     except IchancyError as e:
         with db() as c:c.execute("UPDATE ichancy_operations SET status='needs_review',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='sending'",(opid,))
-        await q.message.answer(f'⚠️ العملية #{opid} بحاجة مراجعة إدارية، ولا يجوز تكرارها.\n{e}')
+        await q.message.answer(f'⚠️ نتيجة العملية #{opid} غير مؤكدة، ولا يجوز تكرارها تلقائياً.\n{e}')
         return
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
