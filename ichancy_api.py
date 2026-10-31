@@ -9,10 +9,19 @@ from pathlib import Path
 
 import aiohttp
 
-BASE = os.getenv('ICHANCY_API_BASE_URL', 'https://agents.ichancy.com').rstrip('/')
-USER = os.getenv('ICHANCY_CASHIER_USERNAME', '').strip()
-PASSWORD = os.getenv('ICHANCY_CASHIER_PASSWORD', '')
-AGENT = os.getenv('ICHANCY_AGENT_ID', '').strip()
+# The official Agent API document lists only paths (/global/api/UserApi/...), NOT a host.
+# Therefore there is deliberately no default: set ICHANCY_API_BASE_URL to the host Ichancy
+# gave you for the Agent API. The cashier-panel host/endpoint (/global/api/User/signIn) is a
+# different API and is not assumed to be the same.
+BASE = os.getenv('ICHANCY_API_BASE_URL', '').strip().rstrip('/')
+# Per the document, signin takes the AGENT EMAIL as "username".
+USER = (os.getenv('ICHANCY_AGENT_EMAIL') or os.getenv('ICHANCY_CASHIER_USERNAME') or '').strip()
+PASSWORD = os.getenv('ICHANCY_AGENT_PASSWORD') or os.getenv('ICHANCY_CASHIER_PASSWORD') or ''
+AGENT = os.getenv('ICHANCY_AGENT_ID', '2836401').strip()
+# The document does not state how the access token is sent. 'Bearer' is an assumption
+# (standard JWT usage); override with ICHANCY_AUTH_SCHEME if Ichancy specifies otherwise
+# (use 'none' to send the raw token in the Authorization header).
+AUTH_SCHEME = os.getenv('ICHANCY_AUTH_SCHEME', 'Bearer').strip()
 
 # Keep the token pair on the same mounted volume as the bot DB, when configured.
 # Railway requires a persistent volume mounted at /data for this to survive redeploys.
@@ -88,12 +97,15 @@ class Client:
         return self.access
 
     async def raw(self, endpoint, data, token=None):
+        if not BASE:
+            raise IchancyError('ICHANCY_API_BASE_URL غير مضبوط: توثيق Agent API لا يحدد عنوان الخادم، '
+                               'احصل عليه من Ichancy وضعه في Railway Variables')
         if not BASE.startswith('https://'):
             raise IchancyError('ICHANCY_API_BASE_URL يجب أن يبدأ بـ HTTPS')
         headers = {'Accept': 'application/json', 'Content-Type': 'application/json',
                    'User-Agent': 'EL-SHEIKH-Official-AgentAPI/1.1'}
         if token:
-            headers['Authorization'] = 'Bearer ' + token
+            headers['Authorization'] = token if AUTH_SCHEME.lower() == 'none' else f'{AUTH_SCHEME} {token}'
         timeout = aiohttp.ClientTimeout(total=20, connect=8)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -106,10 +118,24 @@ class Client:
                         raise IchancyError(f'API يعيد HTTP {status} عند {endpoint}؛ تحقق من عنوان الخادم')
                     if 'json' not in content_type.lower():
                         if status == 403:
-                            logging.warning('Ichancy forbidden endpoint=%s cf_ray=%s', endpoint, ray or '-')
+                            # A CF-Ray header alone does not prove a Cloudflare WAF block:
+                            # the origin can send 403 through Cloudflare as well.
+                            sample = (await response.content.read(2048)).decode('utf-8', errors='replace').lower()
+                            challenged = (response.headers.get('cf-mitigated', '').lower() == 'challenge'
+                                          or 'challenge-platform' in sample
+                                          or 'just a moment' in sample
+                                          or 'attention required' in sample)
+                            origin = 'Cloudflare challenge' if challenged else 'server/origin or Cloudflare rule'
+                            logging.warning('Ichancy HTTP 403 endpoint=%s source=%s cf_ray=%s',
+                                            endpoint, origin, ray or '-')
                             raise IchancyForbidden(f'Ichancy يرفض الاتصال HTTP 403 عند {endpoint}'
                                 + (f' (CF-Ray: {ray})' if ray else '')
-                                + '؛ الطلب مرفوض على مستوى السيرفر/Cloudflare، وتجديد التوكن لا يصلحه.')
+                                + ('؛ يوجد تحدي Cloudflare للطلبات غير التفاعلية.' if challenged else
+                                   '؛ غير معروف إن كان الرفض من Cloudflare أم من الخادم الأصلي.')
+                                + ' تجديد التوكن لا يحل رفض signin قبل إصدار توكن.'
+                + ' ملاحظة: نجاح دخول لوحة الكاشير (/global/api/User/signIn) لا يثبت أن Agent API'
+                + ' (UserApi) متاح من هذا الخادم؛ هما واجهتان مختلفتان، تأكد من العنوان الرسمي'
+                + ' وطلب السماح لعنوان IP الخاص بـ Railway من Ichancy.')
                         raise IchancyError(f'Ichancy رد HTTP {status} ليس JSON عند {endpoint} ({content_type[:65]})')
                     try:
                         body = await response.json(content_type=None)
@@ -120,8 +146,18 @@ class Client:
                     notices = body.get('notification') or []
                     detail = '; '.join(str(x.get('content', ''))[:140] for x in notices if isinstance(x, dict))[:260]
                     result = body.get('result')
-                    if status == 401 or (endpoint == 'refreshToken' and ('expired refresh token' in detail.lower() or 'invalid refresh token' in detail.lower())):
-                        raise IchancyAuthExpired(f'جلسة Ichancy منتهية عند {endpoint}')
+                    # The official 2026 documentation shows HTTP 201 + result='ex'
+                    # for an expired access token, not only HTTP 401.
+                    # Distinguish that from HTTP 201 sign-in errors, which are NOT
+                    # evidence an access token expired.
+                    expired_access = (endpoint not in ('signin', 'refreshToken') and
+                                      (status in (201, 401) and
+                                       (result == 'ex' or status == 401)))
+                    expired_refresh = (endpoint == 'refreshToken' and
+                                       (status == 401 or any(t in detail.lower() for t in (
+                                           'expired refresh token', 'invalid refresh token'))))
+                    if expired_access or expired_refresh:
+                        raise IchancyAuthExpired(f'جلسة Ichancy منتهية عند {endpoint} (HTTP {status})')
                     if status >= 400 or body.get('status') is False or result is False or result is None:
                         raise IchancyError(f'{endpoint}: HTTP {status}: {detail or "رفض الخادم الطلب"}')
                     return result
@@ -155,7 +191,7 @@ class Client:
                     else:
                         raise IchancyError('استجابة refreshToken غير واضحة، لن نلغي الجلسة ونعيد signin عشوائياً')
             if not USER or not PASSWORD:
-                raise IchancyError('أضف بيانات الكاشير في Railway')
+                raise IchancyError('أضف إيميل الأجنت وكلمة السر (ICHANCY_AGENT_EMAIL / ICHANCY_AGENT_PASSWORD) في Railway')
             return self._set_tokens(await self.raw('signin', {'username': USER, 'password': PASSWORD}))
 
     async def call(self, endpoint, payload):

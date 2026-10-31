@@ -214,8 +214,10 @@ async def ichancy_check(m:Message):
     if not m.from_user or m.from_user.id not in ADMIN_IDS:
         return
     from ichancy_api import BASE, AGENT, USER, PASSWORD
+    if not BASE:
+        return await m.answer('❌ ICHANCY_API_BASE_URL غير مضبوط. التوثيق الرسمي لا يحدد عنوان الخادم؛ احصل عليه من Ichancy.')
     if not USER or not PASSWORD:
-        return await m.answer('❌ متغيرات ICHANCY_CASHIER_USERNAME / ICHANCY_CASHIER_PASSWORD غير مكتملة.')
+        return await m.answer('❌ متغيرات ICHANCY_AGENT_EMAIL / ICHANCY_AGENT_PASSWORD غير مكتملة.')
     if not AGENT:
         return await m.answer('❌ متغير ICHANCY_AGENT_ID غير مضبوط.')
     try:
