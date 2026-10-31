@@ -19,20 +19,37 @@ class Client:
         TOKEN_FILE.parent.mkdir(parents=True,exist_ok=True)
         tmp=TOKEN_FILE.with_suffix('.tmp');tmp.write_text(json.dumps(dict(access=self.access,refresh=self.refresh,expires=self.expires)));tmp.chmod(0o600);tmp.replace(TOKEN_FILE)
     async def raw(self,endpoint,data,token=None):
-        if not BASE.startswith('https://'):raise IchancyError('ICHANCY_API_BASE_URL must be HTTPS')
+        if not BASE.startswith('https://'):
+            raise IchancyError('رابط ICHANCY_API_BASE_URL غير صالح: لازم يبدأ بـ https://')
         headers={'Accept':'application/json','Content-Type':'application/json'}
         if token:headers['Authorization']='Bearer '+token
-        timeout=aiohttp.ClientTimeout(total=20)
+        timeout=aiohttp.ClientTimeout(total=20,connect=8)
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as s:
-                async with s.post(BASE+'/global/api/UserApi/'+endpoint,json=data,headers=headers) as r:
-                    body=await r.json(content_type=None)
-                    if not isinstance(body,dict):raise IchancyError('استجابة غير مفهومة من الخادم')
-                    if r.status>=400 or body.get('status') is False or body.get('result') is False or body.get('result') is None:
-                        msg='; '.join(str(n.get('content','')) for n in body.get('notification',[]) if isinstance(n,dict))
-                        raise IchancyError(msg or 'رفض الخادم الطلب')
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(BASE+'/global/api/UserApi/'+endpoint,json=data,headers=headers,allow_redirects=False) as response:
+                    status=response.status
+                    content_type=response.headers.get('Content-Type','')
+                    if status in (301,302,303,307,308):
+                        raise IchancyError(f'عنوان API يعيد تحويل HTTP {status} عند {endpoint}؛ راجع ICHANCY_API_BASE_URL')
+                    try:
+                        body=await response.json(content_type=None)
+                    except (ValueError,aiohttp.ContentTypeError):
+                        raise IchancyError(f'الخادم أعاد HTTP {status} وليس JSON عند {endpoint} (Content-Type: {content_type[:65]})؛ تأكد من عنوان API')
+                    if not isinstance(body,dict):
+                        raise IchancyError(f'رد غير مفهوم عند {endpoint}: HTTP {status}')
+                    notifications=body.get('notification') or []
+                    details='; '.join(str(item.get('content','')) for item in notifications if isinstance(item,dict))
+                    if status>=400 or body.get('status') is False or body.get('result') is False or body.get('result') is None:
+                        raise IchancyError(f'{endpoint}: HTTP {status} - '+(details or 'الخادم رفض الطلب'))
                     return body.get('result')
-        except (aiohttp.ClientError,asyncio.TimeoutError,ValueError) as e:raise IchancyError('تعذر تأكيد العملية من الخادم؛ لا تعيد إرسال طلب مالي تلقائياً') from e
+        except asyncio.TimeoutError as exc:
+            raise IchancyError(f'انتهت مهلة الاتصال (20 ثانية) عند {endpoint}؛ حالة الطلب غير مؤكدة') from exc
+        except aiohttp.ClientConnectorCertificateError as exc:
+            raise IchancyError(f'فشل التحقق من شهادة HTTPS عند {endpoint}') from exc
+        except aiohttp.ClientConnectorError as exc:
+            raise IchancyError(f'تعذر الاتصال بعنوان API عند {endpoint}؛ راجع ICHANCY_API_BASE_URL وDNS') from exc
+        except aiohttp.ClientError as exc:
+            raise IchancyError(f'انقطع الاتصال عند {endpoint}؛ حالة الطلب غير مؤكدة ({type(exc).__name__})') from exc
     async def auth(self,force=False):
         async with self.lock:
             if self.access and self.expires>time.time()+60 and not force:return self.access

@@ -78,7 +78,7 @@ async def register(m:Message,state:FSMContext):
         with db() as c:c.execute('INSERT INTO ichancy_accounts(telegram_id,login) VALUES(?,?)',(m.from_user.id,login))
         await progress.edit_text(f'✅ تم إنشاء الحساب\nالدخول: {login}\nالإيميل: {email}\nكلمة السر: {password}\nاحفظ كلمة السر بمكان آمن.',reply_markup=kb())
     except (IchancyError,sqlite3.Error,asyncio.TimeoutError) as e:
-        await progress.edit_text(f'⚠️ لم يتم تأكيد إنشاء الحساب: {e}\nلا تعيد المحاولة بنفس الاسم قبل التحقق من وجود الحساب.',reply_markup=kb())
+        await progress.edit_text(f'⚠️ لم يتم تأكيد إنشاء الحساب: {e}\nإذا وصل الطلب إلى registerPlayer، تحقّق من وجود الحساب قبل إعادة المحاولة.',reply_markup=kb())
     except Exception:
         logging.exception('Ichancy registration unexpected failure')
         await progress.edit_text('❌ حدث خطأ تقني أثناء إنشاء الحساب. لم يتم تأكيد العملية. راجع سجلات Railway قبل إعادة المحاولة.',reply_markup=kb())
