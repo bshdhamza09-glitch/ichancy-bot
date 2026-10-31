@@ -16,6 +16,8 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.tmp.cleanup)
         patcher = patch.object(api, 'TOKEN_FILE', Path(self.tmp.name)/'tokens.json')
         patcher.start(); self.addCleanup(patcher.stop)
+        b = patch.object(api, 'BASE', 'https://example.invalid')
+        b.start(); self.addCleanup(b.stop)
 
     async def test_refresh_rotates_and_persists_pair(self):
         client = api.Client()
@@ -137,6 +139,29 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                 await api.Client().raw('signin', {'username':'bad','password':'bad'})
         self.assertNotIsInstance(cm.exception,api.IchancyAuthExpired)
         self.assertIn('Invalid username',str(cm.exception))
+
+    async def test_missing_base_url_is_refused_not_invented(self):
+        with patch.object(api,'BASE',''):
+            with self.assertRaises(api.IchancyError) as cm:
+                await api.Client().raw('signin',{'username':'a','password':'b'})
+        self.assertIn('ICHANCY_API_BASE_URL',str(cm.exception))
+
+    async def test_agent_id_default_and_auth_header(self):
+        self.assertEqual(api.AGENT,'2836401')
+        seen={}
+        class R:
+            status=200;headers={'Content-Type':'application/json'}
+            async def __aenter__(self):return self
+            async def __aexit__(self,*a):pass
+            async def json(self,**k):return {'status':True,'result':[{'currencyCode':'NSP'}],'notification':[]}
+        class S:
+            async def __aenter__(self):return self
+            async def __aexit__(self,*a):pass
+            def post(self,url,**kw):seen['url']=url;seen['h']=kw['headers'];return R()
+        with patch.object(api,'BASE','https://example.invalid'),patch.object(api.aiohttp,'ClientSession',return_value=S()):
+            await api.Client().raw('getAgentAllWallets',{},token='tok')
+        self.assertEqual(seen['url'],'https://example.invalid/global/api/UserApi/getAgentAllWallets')
+        self.assertEqual(seen['h']['Authorization'],'Bearer tok')
 
 
 if __name__=='__main__':unittest.main()
