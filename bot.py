@@ -2431,6 +2431,8 @@ async def main():
     dp=Dispatcher()
     router.message.middleware(MembershipMiddleware())
     router.callback_query.middleware(MembershipMiddleware())
+    from ichancy_handlers import router as ichancy_router
+    dp.include_router(ichancy_router)
     dp.include_router(router)
     from wheel_server import serve
     runner=await serve()
