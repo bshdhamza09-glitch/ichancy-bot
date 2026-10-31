@@ -1,5 +1,5 @@
 """Official documented Ichancy Agent API client. No legacy endpoints."""
-import asyncio, json, os, time, secrets
+import asyncio, json, os, time, secrets, logging
 from pathlib import Path
 import aiohttp
 
@@ -21,7 +21,7 @@ class Client:
     async def raw(self,endpoint,data,token=None):
         if not BASE.startswith('https://'):
             raise IchancyError('رابط ICHANCY_API_BASE_URL غير صالح: لازم يبدأ بـ https://')
-        headers={'Accept':'application/json','Content-Type':'application/json'}
+        headers={'Accept':'application/json','Content-Type':'application/json','User-Agent':'EL-SHEIKH-Ichancy-Agent-Integration/1.0'}
         if token:headers['Authorization']='Bearer '+token
         timeout=aiohttp.ClientTimeout(total=20,connect=8)
         try:
@@ -31,10 +31,20 @@ class Client:
                     content_type=response.headers.get('Content-Type','')
                     if status in (301,302,303,307,308):
                         raise IchancyError(f'عنوان API يعيد تحويل HTTP {status} عند {endpoint}؛ راجع ICHANCY_API_BASE_URL')
+                    # The public site returns HTML 403 to Railway, before signin.
+                    # Report actionable metadata, NEVER forward challenge HTML/cookies/tokens.
+                    ray=response.headers.get('CF-Ray','')[:60]
                     try:
                         body=await response.json(content_type=None)
-                    except (ValueError,aiohttp.ContentTypeError):
-                        raise IchancyError(f'الخادم أعاد HTTP {status} وليس JSON عند {endpoint} (Content-Type: {content_type[:65]})؛ تأكد من عنوان API')
+                    except (ValueError, aiohttp.ContentTypeError, UnicodeError):
+                        if status==403 and 'html' in content_type.lower():
+                            logging.warning('Ichancy API blocked: endpoint=%s status=403 cf_ray=%s',endpoint,ray or 'missing')
+                            raise IchancyError(
+                                'HTTP 403 HTML عند '+endpoint+'؛ خادم Ichancy/Cloudflare رفض اتصال Railway قبل إرجاع JSON.'
+                                +(f' CF-Ray: {ray}.' if ray else '')
+                                +' يلزم السماح لاتصال API الرسمي من استضافة البوت، وليس نسخ كوكيز المتصفح.')
+                        logging.warning('Ichancy API non JSON: endpoint=%s status=%s content_type=%s cf_ray=%s', endpoint,status,content_type[:65],ray or 'missing')
+                        raise IchancyError(f'الخادم أعاد HTTP {status} وليس JSON عند {endpoint} (Content-Type: {content_type[:65]})'+(f' CF-Ray: {ray}' if ray else ''))
                     if not isinstance(body,dict):
                         raise IchancyError(f'رد غير مفهوم عند {endpoint}: HTTP {status}')
                     notifications=body.get('notification') or []

@@ -63,7 +63,17 @@ async def inline_menu(q:CallbackQuery,state:FSMContext):
     await q.answer();await say_menu(q.message,state)
 @router.message(F.text=='🆕 إنشاء حساب جديد')
 async def begin(m:Message,state:FSMContext):
-    await state.clear();await state.set_state(Form.name);await m.answer('أدخل اسم حساب Ichancy المطلوب (إنكليزي وأرقام):\nللإلغاء اضغط الزر أدناه.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ إلغاء',callback_data='ichancy_menu')]]))
+    await state.clear()
+    # Validate API access BEFORE collecting a username and displaying 'creating...'.
+    # This is a read-only wallet query; it does not create a player or transfer money.
+    try:
+        await asyncio.wait_for(client.call('getAgentAllWallets',{}),timeout=48)
+    except (IchancyError,asyncio.TimeoutError) as exc:
+        await m.answer('⚠️ إنشاء الحسابات متوقف حالياً بسبب رفض اتصال الـAPI.\n'
+                       +str(exc)+'\nلم يتم إرسال طلب إنشاء حساب. جرّب بعد معالجة الاتصال.',reply_markup=kb())
+        return
+    await state.set_state(Form.name)
+    await m.answer('أدخل اسم حساب Ichancy المطلوب (إنكليزي وأرقام):\nللإلغاء اضغط الزر أدناه.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ إلغاء',callback_data='ichancy_menu')]]))
 @router.message(Form.name)
 async def register(m:Message,state:FSMContext):
     name=(m.text or '').strip().lower()
@@ -84,10 +94,10 @@ async def register(m:Message,state:FSMContext):
         await progress.edit_text('❌ حدث خطأ تقني أثناء إنشاء الحساب. لم يتم تأكيد العملية. راجع سجلات Railway قبل إعادة المحاولة.',reply_markup=kb())
     finally:await state.clear()
 MODES={'💳 شحن حساب':'deposit','💸 سحب من حساب':'withdraw','💰 شحن كامل الرصيد':'deposit_all','📤 سحب كامل الرصيد':'withdraw_all'}
-@router.message(F.text.in_(set(MODES)))
 async def start_transfer(m,state,mode):
     await state.clear();await state.update_data(mode=mode);await state.set_state(Form.account)
     await m.answer('أرسل اسم حساب Ichancy (login) الذي تريد التعامل معه:',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ إلغاء',callback_data='ichancy_menu')]]))
+@router.message(F.text.in_(set(MODES)))
 async def transfer_start(m:Message,state:FSMContext):
     await start_transfer(m,state,MODES[m.text])
 @router.message(Form.account)
@@ -179,6 +189,27 @@ async def confirm(q:CallbackQuery):
 async def games(m:Message):await m.answer('🎰 ألعاب Ichancy: https://ichancy.com',reply_markup=kb())
 @router.message(F.text=='🌐 دخول إيشانسي')
 async def site(m:Message):await m.answer('🌐 الدخول: https://ichancy.com',reply_markup=kb())
+@router.message(Command('ichancy_check'))
+async def ichancy_check(m:Message):
+    """Admin-only, read-only connectivity check. Never prints credentials/tokens."""
+    from bot import ADMIN_IDS
+    if not m.from_user or m.from_user.id not in ADMIN_IDS:
+        return
+    from ichancy_api import BASE, AGENT, USER, PASSWORD
+    if not USER or not PASSWORD:
+        return await m.answer('❌ متغيرات ICHANCY_CASHIER_USERNAME / ICHANCY_CASHIER_PASSWORD غير مكتملة.')
+    if not AGENT:
+        return await m.answer('❌ متغير ICHANCY_AGENT_ID غير مضبوط.')
+    try:
+        wallets=await asyncio.wait_for(client.call('getAgentAllWallets',{}),timeout=48)
+        has_nsp=isinstance(wallets,list) and any(isinstance(x,dict) and x.get('currencyCode')=='NSP' for x in wallets)
+        await m.answer('✅ اتصال Agent API ناجح؛ اختبار getAgentAllWallets: '
+                       +('NSP موجودة.' if has_nsp else 'نجح، لكن محفظة NSP غير ظاهرة.')
+                       +'\nهذا لا يؤكد صلاحية registerPlayer أو التحويلات؛ يلزم اختبار منفصل.')
+    except (IchancyError,asyncio.TimeoutError) as e:
+        await m.answer('❌ فشل اتصال Agent API (اختبار قراءة فقط):\n'+str(e)
+                       +'\nاطلب من الجهة المالكة للسيرفر السماح بطلبات /global/api/UserApi/* من Railway عبر الطريقة الرسمية. لا تستخدم كوكيز المتصفح.')
+
 @router.message(Command('ichancy_balance'))
 async def balance(m:Message):
     parts=(m.text or '').split(maxsplit=1)
